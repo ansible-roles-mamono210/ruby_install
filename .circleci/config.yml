@@ -3,22 +3,62 @@ version: 2.1
 
 orbs:
   ansible-lint: orbss/ansible-lint@0.0.3
+  trailing-whitespace: orbss/trailing-whitespace@0.0.2
   yamllint: orbss/yamllint@0.0.4
+
+parameters:
+  ansible_lint_executor_image:
+    type: string
+    default: ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint:26.1.1-py3.14
+  ansible_lint_executor_resource_class:
+    type: enum
+    enum: [small, medium, medium+, large]
+    default: small
+  molecule_docker_executor_image:
+    type: string
+    default: ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker:26.2.0-py3.14-ans13.4.0
+  molecule_machine_executor_image:
+    type: string
+    default: ubuntu-2204:2023.10.1
+  molecule_machine_executor_resource_class:
+    type: enum
+    enum: [medium, large, xlarge]
+    default: medium
+  trailing_whitespace_executor_image:
+    type: string
+    default: ghcr.io/docker-images-mamono210/circleci-executors/trailing-whitespace:py3.14-20260210
+  trailing_whitespace_executor_resource_class:
+    type: enum
+    enum: [small, medium, medium+, large]
+    default: small
+  yamllint_executor_image:
+    type: string
+    default: ghcr.io/docker-images-mamono210/circleci-executors/yamllint:1.38.0-py3.14
+  yamllint_executor_resource_class:
+    type: enum
+    enum: [small, medium, medium+, large]
+    default: small
 
 jobs:
   ansible-lint:
-    executor: ansible-lint/default
+    executor:
+      name: ansible-lint/default
+      image: << pipeline.parameters.ansible_lint_executor_image >>
+      resource_class: << pipeline.parameters.ansible_lint_executor_resource_class >>
     steps:
       - checkout
       - ansible-lint/execute:
           molecule-role-test: true
   molecule:
     machine:
-      image: ubuntu-2004:202111-02
+      image: << pipeline.parameters.molecule_machine_executor_image >>
+      resource_class: << pipeline.parameters.molecule_machine_executor_resource_class >>
     parameters:
       checkout-path:
         type: string
-      molecule-executor-image:
+      molecule-docker-executor-image:
+        type: string
+      molecule-scenario-name:
         type: string
       molecule-test-image:
         type: string
@@ -33,19 +73,20 @@ jobs:
             cd << parameters.checkout-path >>
 
             docker run --rm -it \
+            -e ANSIBLE_FORCE_COLOR=1 \
             -e MOLECULE_IMAGE=<< parameters.molecule-test-image >> \
             -v "$(pwd)":/tmp/$(basename "${PWD}"):ro \
             -v /usr/bin/docker:/usr/bin/docker \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -w /tmp/$(basename "${PWD}") \
-            << parameters.molecule-executor-image >> \
-            molecule test
+            << parameters.molecule-docker-executor-image >> \
+            molecule test --scenario-name << parameters.molecule-scenario-name >>
       - run:
           name: Show Ansible version
           command: |
             docker run --rm -it \
-            << parameters.molecule-executor-image >> \
-            pip list | grep ansible \
+            << parameters.molecule-docker-executor-image >> \
+            ansible --version \
             | GREP_COLORS='mt=01;34' egrep --color=always '[[:digit:]]' \
             | GREP_COLORS='mt=01;34' egrep --color=always '\.' \
             | GREP_COLORS='mt=01;33' egrep --color=always 'ansible.* '
@@ -53,19 +94,21 @@ jobs:
           name: Show Molecule version
           command: |
             docker run --rm -it \
-            << parameters.molecule-executor-image >> \
+            << parameters.molecule-docker-executor-image >> \
             molecule --version
   trailing-whitespace:
-    docker:
-      - image: ghcr.io/docker-images-mamono210/circleci-executors/trailing-whitespace:latest
-    resource_class: small
+    executor:
+      name: trailing-whitespace/default
+      image: << pipeline.parameters.trailing_whitespace_executor_image >>
+      resource_class: << pipeline.parameters.trailing_whitespace_executor_resource_class >>
     steps:
       - checkout
-      - run:
-          name: Execute trailing-whitespace
-          command: trailing-whitespace
+      - trailing-whitespace/execute
   yamllint:
-    executor: yamllint/default
+    executor:
+      name: yamllint/default
+      image: << pipeline.parameters.yamllint_executor_image >>
+      resource_class: << pipeline.parameters.yamllint_executor_resource_class >>
     steps:
       - checkout
       - yamllint/execute
@@ -86,8 +129,10 @@ workflows:
             parameters:
               checkout-path:
                 - 'ruby_install'
-              molecule-executor-image:
-                - 'ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker:latest'
+              molecule-docker-executor-image:
+                - '<< pipeline.parameters.molecule_docker_executor_image >>'
+              molecule-scenario-name:
+                - 'default'
               molecule-test-image:
                 - 'ghcr.io/docker-images-mamono210/ansible-test/centos-stream9:latest'
           requires:
