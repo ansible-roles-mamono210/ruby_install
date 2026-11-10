@@ -51,7 +51,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Diagnose collection inventory with original and temporary cache
+          name: Inventory the published controller candidate at a fixed digest
           no_output_timeout: 5m
           command: |
             set -euo pipefail
@@ -60,7 +60,7 @@ jobs:
             set +e
             timeout --signal=TERM --kill-after=30s 22m \
               bash scripts/p1/check-environment.sh \
-              --mode collections-diagnostic --allow-pull --ephemeral-ci \
+              --mode controller-candidate --allow-pull --ephemeral-ci \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e

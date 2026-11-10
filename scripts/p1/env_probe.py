@@ -28,6 +28,8 @@ DIAGNOSTIC_IMAGES = {
     'controller': 'ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:b4a4089328cf6acb42e04725f774e68aaafb52991ee74ee9e36e8ae52226be8b',
     'lint': 'ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint@sha256:4ea7fe7ebbe7fd06bd5a7fc61b8931c3303a11c9bd4eb06431a810f5914b8718',
 }
+CANDIDATE_CONTROLLER = 'ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41'
+CANDIDATE_CONFIG_DIGEST = 'sha256:d406bc5afa3a8e24a8893f9e76766cf9648db1b1373ed9e6fcf82a1fadabea83'
 DIGEST = re.compile(r'^sha256:[0-9a-f]{64}$')
 DOCKER = ['docker', '--host', 'unix:///var/run/docker.sock']
 
@@ -165,7 +167,8 @@ def cleanup(name, run_id):
         return False
 
 
-def collect_image(kind, image, allow_pull, run_id, deadline, source, galaxy_cache=None):
+def collect_image(kind, image, allow_pull, run_id, deadline, source, galaxy_cache=None,
+                  expected_image_id=None):
     row = {'requested_ref': image, 'started_at': now(), 'status': 'INCOMPLETE'}
     if galaxy_cache not in (None, 'tmp'):
         raise Stop('INVALID_GALAXY_CACHE_MODE')
@@ -187,6 +190,8 @@ def collect_image(kind, image, allow_pull, run_id, deadline, source, galaxy_cach
         row['stage'] = 'registry_manifest'
         print(kind + ': manifest', flush=True)
         row['registry'] = registry_identity(image, info, deadline)
+        if expected_image_id is not None and info['id'] != expected_image_id:
+            raise Stop('CANDIDATE_CONFIG_DIGEST_MISMATCH')
         # Use the validated immutable local config digest; never resolve the tag again.
         args = DOCKER + ['run', '--rm', '--pull=never', '--platform', 'linux/amd64',
                         '--name', name, '--label', 'ruby-p1.run=' + run_id,
@@ -245,9 +250,38 @@ def diagnostic_summary(images):
     return comparisons, complete
 
 
+def candidate_summary(row):
+    """Candidate inventory only; neither runtime compatibility nor Phase 1 PASS."""
+    try:
+        if row['status'] != 'COLLECTED' or row['cleanup_confirmed'] is not True:
+            return 'INCOMPLETE', 3
+        probe = row['probe']
+        diagnostic = probe['collections_diagnostic']
+        if (probe['collections_status'] != 'COLLECTED'
+                or diagnostic['state'] != 'EXITED'
+                or type(diagnostic['returncode']) is not int
+                or diagnostic['returncode'] != 0):
+            return 'INCOMPLETE', 3
+        collections = probe['collections']
+        if not isinstance(collections, list):
+            return 'INCOMPLETE', 3
+        names = [entry['name'] for entry in collections]
+        if (any(not isinstance(name, str) or not name for name in names)
+                or len(names) != len(set(names))):
+            return 'INCOMPLETE', 3
+        assessment = assess('controller', probe)
+        if assessment['unconfirmed']:
+            return 'INCOMPLETE', 3
+        if assessment['mismatches']:
+            return 'CANDIDATE_MISMATCH', 4
+        return 'CANDIDATE_INVENTORY_COLLECTED_ONLY', 0
+    except (KeyError, TypeError, AttributeError):
+        return 'INCOMPLETE', 3
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=['host', 'images', 'collections-diagnostic'], default='host')
+    parser.add_argument('--mode', choices=['host', 'images', 'collections-diagnostic', 'controller-candidate'], default='host')
     parser.add_argument('--allow-pull', action='store_true')
     parser.add_argument('--ephemeral-ci', action='store_true')
     parser.add_argument('--output', required=True, help='New JSON path; never overwrites')
@@ -290,6 +324,18 @@ def main(argv=None):
             report['docker'] = parsed(DOCKER + ['version', '--format', version_fmt], deadline=deadline)
             source = Path(__file__).with_name('container_probe.py').read_text()
             report['container_probe_sha256'] = hashlib.sha256(source.encode()).hexdigest()
+            if args.mode == 'controller-candidate':
+                report['expected_packages'] = dict(EXPECTED)
+                report['expected_collections'] = dict(COLLECTIONS)
+                report['expected_config_digest'] = CANDIDATE_CONFIG_DIGEST
+                report['remaining'] += ['candidate_pip_check', 'candidate_molecule_driver',
+                                        'candidate_target_smoke', 'stderr_warning_review']
+                report['images']['controller'] = collect_image(
+                    'controller', CANDIDATE_CONTROLLER, args.allow_pull, report['run_id'],
+                    deadline, source, galaxy_cache='tmp',
+                    expected_image_id=CANDIDATE_CONFIG_DIGEST)
+                report['status'], exit_code = candidate_summary(report['images']['controller'])
+                return exit_code
             if args.mode == 'collections-diagnostic':
                 for kind, image in DIAGNOSTIC_IMAGES.items():
                     for cache_mode in ('original', 'tmp'):
