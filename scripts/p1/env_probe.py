@@ -24,6 +24,10 @@ IMAGES = {
 }
 EXPECTED = {'ansible-core': '2.21.6', 'molecule': '26.11.0', 'molecule-plugins': '26.10.12'}
 COLLECTIONS = {'community.general': '13.5.1', 'ansible.posix': '2.2.2', 'community.docker': '5.4.0'}
+DIAGNOSTIC_IMAGES = {
+    'controller': 'ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:b4a4089328cf6acb42e04725f774e68aaafb52991ee74ee9e36e8ae52226be8b',
+    'lint': 'ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint@sha256:4ea7fe7ebbe7fd06bd5a7fc61b8931c3303a11c9bd4eb06431a810f5914b8718',
+}
 DIGEST = re.compile(r'^sha256:[0-9a-f]{64}$')
 DOCKER = ['docker', '--host', 'unix:///var/run/docker.sock']
 
@@ -88,11 +92,13 @@ def host_inventory():
 
 
 def registry_identity(image, info, deadline):
-    repo = image.rsplit(':', 1)[0]
+    repo = image.split('@', 1)[0] if '@' in image else image.rsplit(':', 1)[0]
     refs = [x for x in (info.get('repo_digests') or []) if x.startswith(repo + '@')]
     if len(refs) != 1 or not DIGEST.fullmatch(refs[0].split('@', 1)[1]):
         raise Stop('REGISTRY_DIGEST_NOT_UNIQUE')
     root_ref = refs[0]
+    if '@' in image and root_ref != image:
+        raise Stop('REQUESTED_DIGEST_MISMATCH')
     doc = parsed(DOCKER + ['buildx', 'imagetools', 'inspect', '--raw', root_ref], deadline=deadline)
     root_digest = root_ref.split('@', 1)[1]
     selected = root_digest
@@ -159,8 +165,11 @@ def cleanup(name, run_id):
         return False
 
 
-def collect_image(kind, image, allow_pull, run_id, deadline, source):
+def collect_image(kind, image, allow_pull, run_id, deadline, source, galaxy_cache=None):
     row = {'requested_ref': image, 'started_at': now(), 'status': 'INCOMPLETE'}
+    if galaxy_cache not in (None, 'tmp'):
+        raise Stop('INVALID_GALAXY_CACHE_MODE')
+    row['galaxy_cache_mode'] = 'original' if galaxy_cache is None else 'tmp'
     name = 'ruby-p1-' + run_id + '-' + kind
     created_possible = False
     try:
@@ -186,8 +195,10 @@ def collect_image(kind, image, allow_pull, run_id, deadline, source):
                         '--memory', '512m', '--cpus', '1',
                         '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
                         '--env', 'ANSIBLE_LOCAL_TEMP=/tmp/ansible-local',
-                        '--env', 'ANSIBLE_NOCOLOR=1', '--env', 'XDG_CACHE_HOME=/tmp/cache',
-                        '--entrypoint', 'python3', '-i', info['id'], '-']
+                        '--env', 'ANSIBLE_NOCOLOR=1', '--env', 'XDG_CACHE_HOME=/tmp/cache']
+        if galaxy_cache == 'tmp':
+            args += ['--env', 'ANSIBLE_GALAXY_CACHE_DIR=/tmp/ansible-galaxy-cache']
+        args += ['--entrypoint', 'python3', '-i', info['id'], '-']
         created_possible = True
         row['stage'] = 'container_inventory'
         print(kind + ': inventory', flush=True)
@@ -208,18 +219,44 @@ def collect_image(kind, image, allow_pull, run_id, deadline, source):
     return row
 
 
+def diagnostic_summary(images):
+    """A failed original command can be observed; timeout/missing data cannot pass."""
+    comparisons = {}
+    complete = True
+    for kind in DIAGNOSTIC_IMAGES:
+        pair = [images.get(kind + '_' + mode, {}) for mode in ('original', 'tmp')]
+        observed = all(row.get('status') == 'COLLECTED' and row.get('cleanup_confirmed')
+                       and row.get('probe', {}).get('collections_diagnostic', {}).get('state') == 'EXITED'
+                       and type(row['probe']['collections_diagnostic'].get('returncode')) is int
+                       and ((row['probe']['collections_status'] == 'COLLECTED'
+                             and row['probe']['collections_diagnostic']['returncode'] == 0)
+                            or (row['probe']['collections_status'] == 'COMMAND_FAILED'
+                                and row['probe']['collections_diagnostic']['returncode'] != 0))
+                       for row in pair)
+        original_ok = pair[0].get('probe', {}).get('collections_status') == 'COLLECTED'
+        tmp_ok = pair[1].get('probe', {}).get('collections_status') == 'COLLECTED'
+        if not observed or not tmp_ok:
+            comparisons[kind] = 'INCOMPLETE'
+            complete = False
+        elif original_ok:
+            comparisons[kind] = 'BOTH_SUCCEEDED'
+        else:
+            comparisons[kind] = 'TEMP_CACHE_SUCCEEDED'
+    return comparisons, complete
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=['host', 'images'], default='host')
+    parser.add_argument('--mode', choices=['host', 'images', 'collections-diagnostic'], default='host')
     parser.add_argument('--allow-pull', action='store_true')
     parser.add_argument('--ephemeral-ci', action='store_true')
     parser.add_argument('--output', required=True, help='New JSON path; never overwrites')
     args = parser.parse_args(argv)
-    if args.allow_pull and args.mode != 'images':
-        parser.error('--allow-pull requires --mode images')
+    if args.allow_pull and args.mode == 'host':
+        parser.error('--allow-pull requires an image mode')
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         parser.error('Linux x86_64 is required')
-    if args.mode == 'images' and (not args.ephemeral_ci or os.environ.get('CIRCLECI') != 'true'):
+    if args.mode != 'host' and (not args.ephemeral_ci or os.environ.get('CIRCLECI') != 'true'):
         parser.error('images mode is restricted to an explicitly identified ephemeral CircleCI VM')
     output = Path(args.output)
     if not output.parent.is_dir():
@@ -253,6 +290,21 @@ def main(argv=None):
             report['docker'] = parsed(DOCKER + ['version', '--format', version_fmt], deadline=deadline)
             source = Path(__file__).with_name('container_probe.py').read_text()
             report['container_probe_sha256'] = hashlib.sha256(source.encode()).hexdigest()
+            if args.mode == 'collections-diagnostic':
+                for kind, image in DIAGNOSTIC_IMAGES.items():
+                    for cache_mode in ('original', 'tmp'):
+                        key = kind + '_' + cache_mode
+                        print('Inspecting ' + key, flush=True)
+                        report['images'][key] = collect_image(
+                            kind, image, args.allow_pull and cache_mode == 'original',
+                            report['run_id'] + '-' + cache_mode, deadline, source,
+                            galaxy_cache=None if cache_mode == 'original' else 'tmp')
+                        if report['images'][key]['status'] != 'COLLECTED' or not report['images'][key]['cleanup_confirmed']:
+                            raise Stop('DIAGNOSTIC_COLLECTION_OR_CLEANUP_FAILED')
+                report['comparisons'], complete = diagnostic_summary(report['images'])
+                report['status'] = 'DIAGNOSTIC_COLLECTED_ONLY' if complete else 'INCOMPLETE'
+                exit_code = 0 if complete else 3
+                return exit_code
             for kind, image in IMAGES.items():
                 print('Inspecting ' + kind, flush=True)
                 report['images'][kind] = collect_image(kind, image, args.allow_pull,

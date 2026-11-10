@@ -51,7 +51,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Collect P1-02 environment metadata
+          name: Diagnose collection inventory with original and temporary cache
           no_output_timeout: 5m
           command: |
             set -euo pipefail
@@ -60,7 +60,7 @@ jobs:
             set +e
             timeout --signal=TERM --kill-after=30s 22m \
               bash scripts/p1/check-environment.sh \
-              --mode images --allow-pull --ephemeral-ci \
+              --mode collections-diagnostic --allow-pull --ephemeral-ci \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e

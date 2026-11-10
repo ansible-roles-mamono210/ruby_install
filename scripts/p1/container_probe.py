@@ -10,6 +10,45 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
+
+
+def collection_command():
+    """Return stdout for parsing, but persist only allowlisted failure metadata."""
+    started = time.monotonic()
+    result = {'state': 'OS_ERROR', 'returncode': None, 'errno': None,
+              'stdout_bytes': 0, 'stderr_bytes': 0, 'stderr_hints': []}
+    stdout = stderr = b''
+    try:
+        process = subprocess.run(
+            ['ansible-galaxy', 'collection', 'list', '--format', 'json'],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            env=os.environ.copy(), check=False)
+        stdout, stderr = process.stdout, process.stderr
+        result.update(state='EXITED', returncode=process.returncode)
+    except subprocess.TimeoutExpired as exc:
+        result['state'] = 'TIMEOUT'
+        stdout, stderr = exc.stdout or b'', exc.stderr or b''
+    except OSError as exc:
+        result['errno'] = exc.errno
+    result['elapsed_ms'] = round((time.monotonic() - started) * 1000)
+    result['stdout_bytes'], result['stderr_bytes'] = len(stdout), len(stderr)
+    # No source excerpts, paths, exception strings or raw stderr leave this probe.
+    lower = stderr.lower()
+    patterns = {
+        'READ_ONLY_FILESYSTEM': (b'read-only file system', b'[errno 30]'),
+        'PERMISSION_DENIED': (b'permission denied', b'[errno 13]'),
+        'NO_USABLE_COLLECTION_PATH': (b'none of the provided paths were usable',),
+        'UNKNOWN_CLI_OPTION': (b'unrecognized arguments:', b'no such option:'),
+        'PYTHON_IMPORT_ERROR': (b'modulenotfounderror:', b'importerror:'),
+    }
+    result['stderr_hints'] = sorted(code for code, needles in patterns.items()
+                                    if any(needle in lower for needle in needles))
+    if len(stdout) > 8 * 1024 * 1024 or len(stderr) > 8 * 1024 * 1024:
+        result['state'] = 'OUTPUT_TOO_LARGE'
+    text = stdout.decode('utf-8', errors='replace') if (
+        result['state'] == 'EXITED' and result['returncode'] == 0) else ''
+    return result, text
 
 
 def os_release():
@@ -50,8 +89,9 @@ def main():
         out['tools'][tool] = shutil.which(tool)
     out['dnf_python_module_found'] = importlib.util.find_spec('dnf') is not None
     if out['tools']['ansible-galaxy']:
-        rc, text = command(['ansible-galaxy', 'collection', 'list', '--format', 'json'])
-        if rc == 0:
+        diagnostic, text = collection_command()
+        out['collections_diagnostic'] = diagnostic
+        if diagnostic['state'] == 'EXITED' and diagnostic['returncode'] == 0:
             try:
                 values = json.loads(text)
                 rows = []
