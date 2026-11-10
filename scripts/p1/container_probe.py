@@ -32,6 +32,7 @@ def warning_facts(stderr):
         'ROOT_CACHE': b'/root/.cache',
         'TMP_GALAXY_CACHE': b'/tmp/ansible-galaxy-cache',
         'TMP_ANSIBLE_LOCAL': b'/tmp/ansible-local',
+        'TMP_ANSIBLE_HOME': b'/tmp/ruby-p1-ansible-home',
         'TMP_CACHE': b'/tmp/cache',
         'VAR_LOG_ANSIBLE': b'/var/log/ansible.log',
     }
@@ -42,6 +43,30 @@ def warning_facts(stderr):
         'stderr_review_required': bool(stderr),
     }
 
+def collection_settings():
+    """Read effective search settings before changing the child environment."""
+    from ansible import constants as constants
+    return constants.COLLECTIONS_PATHS, constants.COLLECTIONS_SCAN_SYS_PATH
+
+
+def collection_environment():
+    """Isolate CLI home only in controller checks; retain collection discovery."""
+    env = os.environ.copy()
+    if env.get('RUBY_P1_CONTROLLER_CHECKS') != '1':
+        return env, 'ORIGINAL'
+    paths, scan_sys_path = collection_settings()
+    if (not isinstance(paths, (list, tuple)) or not paths
+            or type(scan_sys_path) is not bool
+            or any(not isinstance(path, str) or not os.path.isabs(path)
+                   or os.pathsep in path or any(ord(char) < 32 for char in path)
+                   for path in paths)):
+        raise ValueError('COLLECTION_SETTINGS_NOT_PRESERVABLE')
+    env['ANSIBLE_HOME'] = '/tmp/ruby-p1-ansible-home'
+    env['ANSIBLE_COLLECTIONS_PATH'] = os.pathsep.join(paths)
+    env['ANSIBLE_COLLECTIONS_SCAN_SYS_PATH'] = 'true' if scan_sys_path else 'false'
+    return env, 'ISOLATED_HOME_SEARCH_PRESERVED'
+
+
 def collection_command():
     """Return stdout for parsing, but persist only allowlisted failure metadata."""
     started = time.monotonic()
@@ -49,10 +74,18 @@ def collection_command():
               'stdout_bytes': 0, 'stderr_bytes': 0, 'stderr_hints': []}
     stdout = stderr = b''
     try:
+        env, result['environment_mode'] = collection_environment()
+    except Exception:
+        # Configuration exceptions may contain private paths or values.
+        result.update(state='CONFIGURATION_ERROR', environment_mode='UNCONFIRMED',
+                      elapsed_ms=round((time.monotonic() - started) * 1000))
+        result.update(warning_facts(b''))
+        return result, ''
+    try:
         process = subprocess.run(
             ['ansible-galaxy', 'collection', 'list', '--format', 'json'],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
-            env=os.environ.copy(), check=False)
+            env=env, check=False)
         stdout, stderr = process.stdout, process.stderr
         result.update(state='EXITED', returncode=process.returncode)
     except subprocess.TimeoutExpired as exc:
