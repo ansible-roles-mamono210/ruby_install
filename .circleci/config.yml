@@ -7,6 +7,10 @@ orbs:
   yamllint: orbss/yamllint@0.0.4
 
 parameters:
+  run_p1_env_probe:
+    type: boolean
+    default: false
+
   ansible_lint_executor_image:
     type: string
     default: ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint:26.1.1-py3.14
@@ -40,6 +44,32 @@ parameters:
     default: small
 
 jobs:
+  p1-environment:
+    machine:
+      image: ubuntu-2204:2023.10.1
+    resource_class: medium
+    steps:
+      - checkout
+      - run:
+          name: Collect P1-02 environment metadata
+          no_output_timeout: 5m
+          command: |
+            set -euo pipefail
+            umask 077
+            mkdir -p p1-evidence
+            set +e
+            timeout --signal=TERM --kill-after=30s 22m \
+              bash scripts/p1/check-environment.sh \
+              --mode images --allow-pull --ephemeral-ci \
+              --output p1-evidence/environment.json
+            p1_probe_rc=$?
+            set -e
+            printf '%s\n' "$p1_probe_rc" > p1-evidence/exit-code.txt
+            exit "$p1_probe_rc"
+      - store_artifacts:
+          path: p1-evidence
+          destination: p1-environment
+
   ansible-lint:
     executor:
       name: ansible-lint/default
@@ -115,7 +145,19 @@ jobs:
 
 workflows:
   version: 2.1
+  p1-environment-measurement:
+    when:
+      and:
+        - << pipeline.parameters.run_p1_env_probe >>
+        - equal: [plan/ruby-100-p1-env-r1, << pipeline.git.branch >>]
+    jobs:
+      - p1-environment
   build:
+    when:
+      and:
+        - not: << pipeline.parameters.run_p1_env_probe >>
+        - not:
+            equal: [plan/ruby-100-p1-env-r1, << pipeline.git.branch >>]
     jobs:
       - trailing-whitespace
       - yamllint:
@@ -137,3 +179,4 @@ workflows:
                 - 'ghcr.io/docker-images-mamono210/ansible-test/centos-stream9:latest'
           requires:
             - ansible-lint
+
