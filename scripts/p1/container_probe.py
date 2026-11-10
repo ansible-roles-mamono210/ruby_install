@@ -13,6 +13,35 @@ import sys
 import time
 
 
+
+def warning_facts(stderr):
+    """Fixed classifications only. No matched substring or arbitrary path is copied."""
+    lower = stderr.lower()
+    patterns = {
+        'READ_ONLY_FILESYSTEM': (b'read-only file system', b'[errno 30]'),
+        'PERMISSION_DENIED': (b'permission denied', b'[errno 13]'),
+        'NO_USABLE_COLLECTION_PATH': (b'none of the provided paths were usable',),
+        'UNKNOWN_CLI_OPTION': (b'unrecognized arguments:', b'no such option:'),
+        'PYTHON_IMPORT_ERROR': (b'modulenotfounderror:', b'importerror:'),
+        'DRIVER_LOAD_ERROR': (b'failed to load', b'skipped loading plugin'),
+    }
+    paths = {
+        'CIRCLECI_ANSIBLE_HOME': b'/home/circleci/.ansible',
+        'CIRCLECI_CACHE': b'/home/circleci/.cache',
+        'ROOT_ANSIBLE_HOME': b'/root/.ansible',
+        'ROOT_CACHE': b'/root/.cache',
+        'TMP_GALAXY_CACHE': b'/tmp/ansible-galaxy-cache',
+        'TMP_ANSIBLE_LOCAL': b'/tmp/ansible-local',
+        'TMP_CACHE': b'/tmp/cache',
+        'VAR_LOG_ANSIBLE': b'/var/log/ansible.log',
+    }
+    return {
+        'stderr_hints': sorted(code for code, needles in patterns.items()
+                               if any(needle in lower for needle in needles)),
+        'stderr_path_classes': sorted(code for code, value in paths.items() if value in stderr),
+        'stderr_review_required': bool(stderr),
+    }
+
 def collection_command():
     """Return stdout for parsing, but persist only allowlisted failure metadata."""
     started = time.monotonic()
@@ -33,17 +62,7 @@ def collection_command():
         result['errno'] = exc.errno
     result['elapsed_ms'] = round((time.monotonic() - started) * 1000)
     result['stdout_bytes'], result['stderr_bytes'] = len(stdout), len(stderr)
-    # No source excerpts, paths, exception strings or raw stderr leave this probe.
-    lower = stderr.lower()
-    patterns = {
-        'READ_ONLY_FILESYSTEM': (b'read-only file system', b'[errno 30]'),
-        'PERMISSION_DENIED': (b'permission denied', b'[errno 13]'),
-        'NO_USABLE_COLLECTION_PATH': (b'none of the provided paths were usable',),
-        'UNKNOWN_CLI_OPTION': (b'unrecognized arguments:', b'no such option:'),
-        'PYTHON_IMPORT_ERROR': (b'modulenotfounderror:', b'importerror:'),
-    }
-    result['stderr_hints'] = sorted(code for code, needles in patterns.items()
-                                    if any(needle in lower for needle in needles))
+    result.update(warning_facts(stderr))
     if len(stdout) > 8 * 1024 * 1024 or len(stderr) > 8 * 1024 * 1024:
         result['state'] = 'OUTPUT_TOO_LARGE'
     text = stdout.decode('utf-8', errors='replace') if (
@@ -124,6 +143,8 @@ def main():
                                                'enabled': cfg.get(section, 'enabled', fallback='1')})
             except (OSError, configparser.Error):
                 out['repo_status'] = 'PARTIAL'
+    if os.environ.get('RUBY_P1_CONTROLLER_CHECKS') == '1':
+        out['controller_checks'] = controller_checks()
     print(json.dumps(out, ensure_ascii=False, sort_keys=True))
 
 

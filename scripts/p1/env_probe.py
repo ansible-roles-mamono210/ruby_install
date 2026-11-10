@@ -22,7 +22,7 @@ IMAGES = {
     'target': 'ghcr.io/docker-images-mamono210/ansible-test/centos-stream9:latest',
     'lint': 'ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint:26.1.1-py3.14',
 }
-EXPECTED = {'ansible-core': '2.21.6', 'molecule': '26.11.0', 'molecule-plugins': '26.10.12'}
+EXPECTED = {'ansible-core': '2.21.6', 'molecule': '26.11.0', 'molecule-plugins': '26.11.0'}
 COLLECTIONS = {'community.general': '13.5.1', 'ansible.posix': '2.2.2', 'community.docker': '5.4.0'}
 DIAGNOSTIC_IMAGES = {
     'controller': 'ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:b4a4089328cf6acb42e04725f774e68aaafb52991ee74ee9e36e8ae52226be8b',
@@ -168,7 +168,7 @@ def cleanup(name, run_id):
 
 
 def collect_image(kind, image, allow_pull, run_id, deadline, source, galaxy_cache=None,
-                  expected_image_id=None):
+                  expected_image_id=None, controller_checks=False):
     row = {'requested_ref': image, 'started_at': now(), 'status': 'INCOMPLETE'}
     if galaxy_cache not in (None, 'tmp'):
         raise Stop('INVALID_GALAXY_CACHE_MODE')
@@ -203,6 +203,10 @@ def collect_image(kind, image, allow_pull, run_id, deadline, source, galaxy_cach
                         '--env', 'ANSIBLE_NOCOLOR=1', '--env', 'XDG_CACHE_HOME=/tmp/cache']
         if galaxy_cache == 'tmp':
             args += ['--env', 'ANSIBLE_GALAXY_CACHE_DIR=/tmp/ansible-galaxy-cache']
+        if controller_checks:
+            args += ['--env', 'RUBY_P1_CONTROLLER_CHECKS=1',
+                     '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
+                     '--env', 'NO_COLOR=1']
         args += ['--entrypoint', 'python3', '-i', info['id'], '-']
         created_possible = True
         row['stage'] = 'container_inventory'
@@ -279,9 +283,50 @@ def candidate_summary(row):
         return 'INCOMPLETE', 3
 
 
+def controller_checks_summary(row):
+    """Check evidence completeness, then failures, then unresolved warnings."""
+    status, code = candidate_summary(row)
+    if code:
+        return status, code
+    try:
+        probe = row['probe']
+        checks = probe['controller_checks']
+        if checks['schema'] != 'ruby-p1-controller-checks-r5':
+            return 'INCOMPLETE', 3
+        metadata = checks['metadata']
+        if metadata['status'] not in ('MATCH', 'MISMATCH'):
+            return 'INCOMPLETE', 3
+        commands = checks['commands']
+        required = ['pip_check', 'import_docker', 'import_requests', 'import_selinux']
+        if metadata['status'] == 'MATCH':
+            required += ['entry_load', 'molecule_drivers']
+            if checks['driver_checks'] != 'EXECUTED':
+                return 'INCOMPLETE', 3
+        elif checks['driver_checks'] != 'SKIPPED_METADATA_NOT_MATCHED':
+            return 'INCOMPLETE', 3
+        observations = [commands[name] for name in required]
+        observations.append(probe['collections_diagnostic'])
+        for command in observations:
+            if (command['state'] != 'EXITED' or type(command['returncode']) is not int
+                    or type(command['stderr_bytes']) is not int or command['stderr_bytes'] < 0):
+                return 'INCOMPLETE', 3
+        if metadata['status'] == 'MISMATCH' or any(c['returncode'] != 0 for c in observations):
+            return 'CONTROLLER_CHECKS_FAILED', 5
+        count = commands['molecule_drivers']['docker_exact_lines']
+        if type(count) is not int:
+            return 'INCOMPLETE', 3
+        if count != 1:
+            return 'CONTROLLER_CHECKS_FAILED', 5
+        if any(c['stderr_bytes'] for c in observations):
+            return 'CONTROLLER_CHECKS_WARNING_REVIEW', 6
+        return 'CONTROLLER_OFFLINE_CHECKS_PASSED_ONLY', 0
+    except (KeyError, TypeError, AttributeError):
+        return 'INCOMPLETE', 3
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=['host', 'images', 'collections-diagnostic', 'controller-candidate'], default='host')
+    parser.add_argument('--mode', choices=['host', 'images', 'collections-diagnostic', 'controller-candidate', 'controller-checks'], default='host')
     parser.add_argument('--allow-pull', action='store_true')
     parser.add_argument('--ephemeral-ci', action='store_true')
     parser.add_argument('--output', required=True, help='New JSON path; never overwrites')
@@ -324,17 +369,32 @@ def main(argv=None):
             report['docker'] = parsed(DOCKER + ['version', '--format', version_fmt], deadline=deadline)
             source = Path(__file__).with_name('container_probe.py').read_text()
             report['container_probe_sha256'] = hashlib.sha256(source.encode()).hexdigest()
-            if args.mode == 'controller-candidate':
+            if args.mode == 'controller-checks':
+                checks_source = Path(__file__).with_name('controller_checks.py').read_text()
+                report['controller_checks_sha256'] = hashlib.sha256(checks_source.encode()).hexdigest()
+                source = checks_source + '\n' + source
+                report['combined_probe_sha256'] = hashlib.sha256(source.encode()).hexdigest()
+            if args.mode in ('controller-candidate', 'controller-checks'):
                 report['expected_packages'] = dict(EXPECTED)
                 report['expected_collections'] = dict(COLLECTIONS)
                 report['expected_config_digest'] = CANDIDATE_CONFIG_DIGEST
                 report['remaining'] += ['candidate_pip_check', 'candidate_molecule_driver',
                                         'candidate_target_smoke', 'stderr_warning_review']
+                extra = {'controller_checks': True} if args.mode == 'controller-checks' else {}
                 report['images']['controller'] = collect_image(
                     'controller', CANDIDATE_CONTROLLER, args.allow_pull, report['run_id'],
                     deadline, source, galaxy_cache='tmp',
-                    expected_image_id=CANDIDATE_CONFIG_DIGEST)
-                report['status'], exit_code = candidate_summary(report['images']['controller'])
+                    expected_image_id=CANDIDATE_CONFIG_DIGEST, **extra)
+                summarize = controller_checks_summary if args.mode == 'controller-checks' else candidate_summary
+                report['status'], exit_code = summarize(report['images']['controller'])
+                if args.mode == 'controller-checks':
+                    report['remaining'] += ['controller_warning_review', 'full_molecule_target_runtime']
+                    if exit_code in (0, 6):
+                        report['remaining'].remove('candidate_pip_check')
+                        report['remaining'].remove('candidate_molecule_driver')
+                    if exit_code == 0:
+                        report['remaining'].remove('stderr_warning_review')
+                        report['remaining'].remove('controller_warning_review')
                 return exit_code
             if args.mode == 'collections-diagnostic':
                 for kind, image in DIAGNOSTIC_IMAGES.items():
