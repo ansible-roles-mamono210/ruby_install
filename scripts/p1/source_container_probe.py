@@ -36,6 +36,12 @@ class Stop(Exception):
     pass
 
 
+class ArchiveTruncated(Stop):
+    def __init__(self, diagnostic):
+        super().__init__('ARCHIVE_TRUNCATED')
+        self.diagnostic = diagnostic
+
+
 def archive_path(value, root, directory=False):
     if (not value or len(value.encode('utf-8')) > MAX_PATH or '\\' in value
             or any(ord(c) < 32 or ord(c) == 127 for c in value) or value.startswith('/')):
@@ -74,6 +80,8 @@ def pax_records(data):
 class ArchiveReader:
     def __init__(self, stream, deadline):
         self.stream, self.deadline, self.count = stream, deadline, 0
+        self.context = {'headers_seen': 0, 'header_offset': 0, 'member_kind': 'none',
+                        'declared_size': 0, 'payload_remaining': 0}
 
     def read(self, size):
         if not 0 <= size <= BLOCK:
@@ -86,17 +94,21 @@ class ArchiveReader:
             raise Stop('ARCHIVE_EXPANSION_LIMIT')
         return data
 
-    def exact(self, size):
+    def exact(self, size, stage='header'):
+        offset = self.count
         data = self.read(size)
         if len(data) != size:
-            raise Stop('ARCHIVE_TRUNCATED')
+            raise ArchiveTruncated(dict(self.context, stage=stage, stream_offset=offset,
+                                        expected_bytes=size, received_bytes=len(data)))
         return data
 
     def skip_payload(self, size):
         while size:
             chunk = min(size, BLOCK)
-            self.exact(chunk)
+            self.context['payload_remaining'] = size
+            self.exact(chunk, 'file_payload')
             size -= chunk
+        self.context['payload_remaining'] = 0
 
 
 def check_archive_graph(nodes, root):
@@ -171,9 +183,11 @@ def audit_archive(path, version, deadline):
         with gzip.open(path, 'rb') as stream:
             reader = ArchiveReader(stream, deadline)
             while True:
+                reader.context.update(headers_seen=headers, header_offset=reader.count,
+                                      member_kind='none', declared_size=0, payload_remaining=0)
                 block = reader.exact(512)
                 if block == bytes(512):
-                    if pending or chain or reader.exact(512) != bytes(512):
+                    if pending or chain or reader.exact(512, 'second_end_block') != bytes(512):
                         raise Stop('ARCHIVE_END_INVALID')
                     # Read through gzip EOF/CRC and reject hidden concatenated tar data.
                     while True:
@@ -188,14 +202,18 @@ def audit_archive(path, version, deadline):
                 headers += 1
                 if headers > MAX_HEADERS:
                     raise Stop('ARCHIVE_HEADER_LIMIT')
+                reader.context['headers_seen'] = headers
                 member = tarfile.TarInfo.frombuf(block, 'utf-8', 'strict')
                 if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE,
                                    tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK):
                     chain += 1
                     if chain > 8 or not 0 < member.size <= MAX_METADATA:
                         raise Stop('ARCHIVE_METADATA_LIMIT')
-                    data = reader.exact(member.size)
-                    if any(reader.exact((-member.size) % 512)):
+                    reader.context.update(member_kind='metadata', declared_size=member.size,
+                                          payload_remaining=member.size)
+                    data = reader.exact(member.size, 'extension_payload')
+                    reader.context['payload_remaining'] = 0
+                    if any(reader.exact((-member.size) % 512, 'extension_padding')):
                         raise Stop('ARCHIVE_PADDING_INVALID')
                     if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE):
                         values = pax_records(data)
@@ -238,8 +256,9 @@ def audit_archive(path, version, deadline):
                 nodes[name] = (kind, target, size)
                 counts[kind] += 1
                 file_bytes += size
+                reader.context.update(member_kind=kind, declared_size=size)
                 reader.skip_payload(size)
-                if any(reader.exact((-size) % 512)):
+                if any(reader.exact((-size) % 512, 'file_padding')):
                     raise Stop('ARCHIVE_PADDING_INVALID')
             check_archive_graph(nodes, root)
             return {'status': 'PASSED', 'policy': 'bounded_metadata_audit_r18', 'root': root,
@@ -309,7 +328,7 @@ def download(source, row):
     start = time.monotonic()
     try:
         connection.request('GET', path, headers={
-            'Accept-Encoding': 'identity', 'User-Agent': 'ruby-p1-source-measurement-r18'})
+            'Accept-Encoding': 'identity', 'User-Agent': 'ruby-p1-source-measurement-r19'})
         response = connection.getresponse()
         row['http_status'] = response.status
         # http.client does not follow redirects. Never request the Location URL.
@@ -322,7 +341,11 @@ def download(source, row):
         with tempfile.TemporaryDirectory(prefix='ruby-p1-source-', dir='/tmp') as directory:
             archive = Path(directory) / 'source.tar.gz'
             row.update(receive(response, archive, expected, start + 120))
-            row['archive'] = audit_archive(archive, version, min(start + 150, time.monotonic() + 60))
+            try:
+                row['archive'] = audit_archive(archive, version, min(start + 150, time.monotonic() + 60))
+            except ArchiveTruncated as error:
+                row['archive_failure'] = error.diagnostic
+                raise
         row['elapsed_seconds'] = round(time.monotonic() - start, 3)
         row['temporary_file_removed'] = True
     finally:
@@ -330,7 +353,7 @@ def download(source, row):
 
 
 def main():
-    report = {'schema': 'ruby-p1-source-container-r18', 'status': 'INCOMPLETE',
+    report = {'schema': 'ruby-p1-source-container-r19', 'status': 'INCOMPLETE',
               'scope': 'two_fixed_https_urls_no_extraction', 'results': [],
               'redirect_policy': 'reject_all_for_measurement_only',
               'redirect_fixture_tested': False, 'ansible_download_verified': False,

@@ -51,7 +51,7 @@ def archive_report(version):
 
 
 def report():
-    return {'schema': 'ruby-p1-source-container-r18', 'status': w.SUCCESS,
+    return {'schema': 'ruby-p1-source-container-r19', 'status': w.SUCCESS,
             'scope': 'two_fixed_https_urls_no_extraction', 'python': '3.9.19',
             'redirect_policy': 'reject_all_for_measurement_only',
             'redirect_fixture_tested': False, 'ansible_download_verified': False,
@@ -242,7 +242,7 @@ class HostTests(unittest.TestCase):
     def test_failure_summary_omits_unapproved_fields(self):
         value = {'reason': 'SHA256_MISMATCH', 'SECRET': 'SECRET', 'results': [
             {'version': '3.4.12', 'http_status': 200, 'redirect': 'none', 'url': 'SECRET', 'body': 'SECRET'}]}
-        result = h.failure_summary(value)
+        result = h.failure_summary(value, w)
         self.assertNotIn('SECRET', json.dumps(result))
         self.assertEqual(result['reason'], 'SHA256_MISMATCH')
 

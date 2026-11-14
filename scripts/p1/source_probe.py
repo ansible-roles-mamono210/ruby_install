@@ -49,7 +49,7 @@ def validate(value, worker):
                      'redirect_fixture_tested', 'ansible_download_verified',
                      'archive_safety_verified', 'build_verified'}
     if (type(value) is not dict or set(value) != expected_keys
-            or value['schema'] != 'ruby-p1-source-container-r18'
+            or value['schema'] != 'ruby-p1-source-container-r19'
             or value['status'] != worker.SUCCESS
             or value['scope'] != 'two_fixed_https_urls_no_extraction'
             or value['redirect_policy'] != 'reject_all_for_measurement_only'
@@ -98,7 +98,37 @@ def validate_archive(value, version, worker):
         raise Stop('ARCHIVE_RESULT_MISMATCH')
 
 
-def failure_summary(value):
+def truncation_diagnostic(value, worker):
+    """Accept only bounded positions, sizes and fixed categories, never names."""
+    numeric = {'headers_seen': worker.MAX_HEADERS, 'header_offset': worker.MAX_TAR_BYTES,
+               'stream_offset': worker.MAX_TAR_BYTES, 'declared_size': worker.MAX_FILE_BYTES,
+               'payload_remaining': worker.MAX_FILE_BYTES, 'expected_bytes': worker.BLOCK,
+               'received_bytes': worker.BLOCK}
+    stages = {'header', 'second_end_block', 'extension_payload', 'extension_padding',
+              'file_payload', 'file_padding'}
+    kinds = {'none', 'metadata', 'file', 'directory', 'symlink', 'hardlink'}
+    if (type(value) is not dict or set(value) != set(numeric) | {'stage', 'member_kind'}
+            or type(value['stage']) is not str or value['stage'] not in stages
+            or type(value['member_kind']) is not str or value['member_kind'] not in kinds
+            or any(type(value[k]) is not int or not 0 <= value[k] <= limit
+                   for k, limit in numeric.items())
+            or not 0 <= value['received_bytes'] < value['expected_bytes']
+            or value['header_offset'] % 512
+            or value['header_offset'] > value['stream_offset']
+            or value['stream_offset'] + value['received_bytes'] > worker.MAX_TAR_BYTES
+            or value['payload_remaining'] > value['declared_size']):
+        return None
+    stage, kind = value['stage'], value['member_kind']
+    if ((stage in ('header', 'second_end_block') and
+         (kind != 'none' or value['expected_bytes'] != 512 or value['declared_size'] != 0))
+            or (stage.startswith('extension_') and
+                (kind != 'metadata' or value['declared_size'] > worker.MAX_METADATA))
+            or (stage in ('file_payload', 'file_padding') and kind != 'file')):
+        return None
+    return dict(value)
+
+
+def failure_summary(value, worker):
     # Keep only bounded categories; never persist raw HTTP headers, body or errors.
     reasons = {'CONTAINER_IDENTITY_MISMATCH', 'NETWORK_OR_TLS_OVERRIDE_PRESENT',
                'SOURCE_NOT_ALLOWED', 'TLS_POLICY_MISMATCH', 'REDIRECT_NOT_FOLLOWED',
@@ -128,6 +158,17 @@ def failure_summary(value):
                 item['http_status'] = row['http_status']
             if row.get('redirect') in ('none', 'http', 'https', 'relative', 'missing', 'invalid', 'other'):
                 item['redirect'] = row['redirect']
+            checksum = next((d for v, _, d in worker.SOURCES if v == row.get('version')), None)
+            if (checksum is not None and row.get('checksum_match') is True
+                    and row.get('sha256') == checksum and type(row.get('bytes')) is int
+                    and 0 < row['bytes'] <= worker.MAX_BYTES):
+                item.update(checksum_match=True, sha256=checksum, bytes=row['bytes'])
+            if result['reason'] == 'ARCHIVE_TRUNCATED' and 'archive_failure' in row:
+                diagnostic = truncation_diagnostic(row['archive_failure'], worker)
+                if diagnostic is None:
+                    item['archive_failure_diagnostic_rejected'] = True
+                else:
+                    item['archive_failure'] = diagnostic
             result['observations'].append(item)
     return result
 
@@ -148,12 +189,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-source-run-r18', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-source-run-r19', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-source-r18'
+    name = 'ruby-p1-' + run_id + '-source-r19'
     handlers = {}
     try:
         def interrupted(_signum, _frame):
@@ -193,7 +234,7 @@ def main(argv=None):
         if type(value) is not dict:
             raise Stop('WORKER_SCHEMA')
         if value.get('status') != worker.SUCCESS:
-            report['failure'] = failure_summary(value)
+            report['failure'] = failure_summary(value, worker)
             raise Stop('SOURCE_MEASUREMENT_INCOMPLETE')
         validate(value, worker)
         if result.returncode != 0:

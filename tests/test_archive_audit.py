@@ -1,5 +1,6 @@
 """Malicious archive fixtures, entirely offline; no extraction or execution."""
 import contextlib
+import copy
 import gzip
 import io
 import os
@@ -297,9 +298,137 @@ class AuditIntegrationTests(unittest.TestCase):
                 h.validate(data, w)
 
     def test_archive_failure_summary_is_bounded(self):
-        value = h.failure_summary({'reason': 'ARCHIVE_DUPLICATE', 'member': 'SECRET'})
+        value = h.failure_summary({'reason': 'ARCHIVE_DUPLICATE', 'member': 'SECRET'}, w)
         self.assertEqual(value['reason'], 'ARCHIVE_DUPLICATE')
         self.assertNotIn('SECRET', str(value))
+
+
+class TruncationDiagnosticTests(unittest.TestCase):
+    audit = ArchiveTests.audit
+    def diagnostic(self, raw):
+        with self.assertRaises(w.ArchiveTruncated) as captured:
+            self.audit(raw=raw)
+        self.assertEqual(str(captured.exception), 'ARCHIVE_TRUNCATED')
+        result = captured.exception.diagnostic
+        self.assertEqual(h.truncation_diagnostic(result, w), result)
+        return result
+
+    def test_header_position_is_distinct_from_payload(self):
+        d = self.diagnostic(tar_bytes(valid_entries())[:600])
+        self.assertEqual((d['stage'], d['header_offset'], d['stream_offset'],
+                          d['expected_bytes'], d['received_bytes'], d['headers_seen']),
+                         ('header', 512, 512, 512, 88, 1))
+
+    def test_missing_first_and_second_end_blocks_are_distinct(self):
+        raw = tar_bytes(valid_entries())
+        first = self.diagnostic(raw[:3584])
+        second = self.diagnostic(raw[:4096])
+        self.assertEqual((first['stage'], first['stream_offset']), ('header', 3584))
+        self.assertEqual((second['stage'], second['stream_offset']), ('second_end_block', 4096))
+        self.assertEqual(first['received_bytes'], 0)
+        self.assertEqual(second['received_bytes'], 0)
+
+    def test_payload_records_remaining_bytes_and_no_member_name(self):
+        raw = tar_bytes([entry(ROOT, kind=tarfile.DIRTYPE),
+                         entry(ROOT + '/SECRET', b'0123456789')])
+        d = self.diagnostic(raw[:1027])
+        self.assertEqual((d['stage'], d['headers_seen'], d['header_offset'],
+                          d['stream_offset'], d['declared_size'], d['payload_remaining'],
+                          d['expected_bytes'], d['received_bytes']),
+                         ('file_payload', 2, 512, 1024, 10, 10, 10, 3))
+        self.assertNotIn('SECRET', str(d))
+
+    def test_payload_position_after_one_full_read_chunk(self):
+        raw = tar_bytes([entry(ROOT, kind=tarfile.DIRTYPE),
+                         entry(ROOT + '/large', b'x' * (w.BLOCK + 10))])
+        d = self.diagnostic(raw[:1024 + w.BLOCK + 2])
+        self.assertEqual((d['stream_offset'], d['declared_size'], d['payload_remaining'],
+                          d['expected_bytes'], d['received_bytes']),
+                         (1024 + w.BLOCK, w.BLOCK + 10, 10, 10, 2))
+
+    def test_padding_position_is_distinct_from_payload(self):
+        d = self.diagnostic(tar_bytes(valid_entries())[:1125])
+        self.assertEqual((d['stage'], d['stream_offset'], d['expected_bytes'],
+                          d['received_bytes'], d['payload_remaining']),
+                         ('file_padding', 1025, 511, 100, 0))
+
+    def test_extension_payload_and_padding_are_distinct(self):
+        item = tarfile.TarInfo('././@LongLink')
+        item.type, item.size = tarfile.GNUTYPE_LONGNAME, 10
+        header = item.tobuf(format=tarfile.GNU_FORMAT)
+        body = self.diagnostic(header + b'abc')
+        padding = self.diagnostic(header + b'123456789\0' + bytes(100))
+        self.assertEqual((body['stage'], body['expected_bytes'], body['received_bytes']),
+                         ('extension_payload', 10, 3))
+        self.assertEqual((padding['stage'], padding['expected_bytes'], padding['received_bytes']),
+                         ('extension_padding', 502, 100))
+
+    def test_gzip_corruption_is_not_relabelled_as_tar_truncation(self):
+        compressed = bytearray(gzip.compress(tar_bytes(valid_entries())))
+        compressed[-8] ^= 1
+        with self.assertRaisesRegex(w.Stop, 'ARCHIVE_FORMAT_INVALID') as captured:
+            self.audit(compressed=bytes(compressed))
+        self.assertNotIsInstance(captured.exception, w.ArchiveTruncated)
+
+    def test_host_rejects_invalid_diagnostic_without_leaking_fields(self):
+        good = self.diagnostic(tar_bytes(valid_entries())[:600])
+        bad_values = []
+        for key, value in (('member_name', 'SECRET'), ('stage', 'SECRET'),
+                           ('member_kind', 'SECRET'), ('expected_bytes', True),
+                           ('stream_offset', -1), ('stream_offset', w.MAX_TAR_BYTES + 1),
+                           ('headers_seen', w.MAX_HEADERS + 1), ('received_bytes', 512),
+                           ('header_offset', 1), ('payload_remaining', 1),
+                           ('declared_size', w.MAX_FILE_BYTES + 1), ('stage', [])):
+            bad_values.append(dict(good, **{key: value}))
+        missing = dict(good); del missing['header_offset']; bad_values.append(missing)
+        bad_values.extend((None, [], 'SECRET'))
+        for diagnostic in bad_values:
+            with self.subTest(diagnostic=diagnostic):
+                result = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED',
+                    'results': [{'version': '3.4.12', 'archive_failure': diagnostic}]}, w)
+                self.assertEqual(result['observations'][0],
+                                 {'version': '3.4.12', 'archive_failure_diagnostic_rejected': True})
+                self.assertNotIn('SECRET', str(result))
+
+    def test_checksum_evidence_requires_fixed_known_digest_and_valid_size(self):
+        row = report()['results'][0]
+        output = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED', 'results': [row]}, w)
+        self.assertEqual(output['observations'][0]['sha256'], w.SOURCES[0][2])
+        self.assertEqual(output['observations'][0]['bytes'], 100)
+        for key, value in (('sha256', 'SECRET'), ('checksum_match', False), ('bytes', True),
+                           ('bytes', 0), ('bytes', w.MAX_BYTES + 1), ('version', 'unknown')):
+            modified = copy.deepcopy(row); modified[key] = value
+            result = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED', 'results': [modified]}, w)
+            self.assertNotIn('sha256', result['observations'][0])
+            self.assertNotIn('bytes', result['observations'][0])
+
+    def test_download_diagnostic_reaches_host_and_still_cleans_up(self):
+        raw = tar_bytes(valid_entries())[:600]
+        compressed = gzip.compress(raw)
+        digest = w.hashlib.sha256(compressed).hexdigest()
+        source = ('3.4.12', w.SOURCES[0][1], digest)
+        conn = Mock(); conn.getresponse.return_value = Response(compressed)
+        row = {'version': '3.4.12'}
+        paths = []
+        original = w.audit_archive
+
+        def capture(path, version, deadline):
+            paths.append(path)
+            return original(path, version, deadline)
+
+        with patch.object(w, 'SOURCES', (source,)), \
+                patch.object(w.http.client, 'HTTPSConnection', return_value=conn), \
+                patch.object(w, 'audit_archive', side_effect=capture), \
+                self.assertRaises(w.ArchiveTruncated):
+            w.download(source, row)
+        self.assertEqual(conn.request.call_count, 1)
+        conn.close.assert_called_once()
+        self.assertTrue(paths and all(not p.exists() for p in paths))
+        with patch.object(w, 'SOURCES', (source,)):
+            result = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED', 'results': [row]}, w)
+        self.assertEqual(result['observations'][0]['archive_failure']['stream_offset'], 512)
+        self.assertEqual(result['observations'][0]['sha256'], digest)
+        self.assertEqual(result['observations'][0]['bytes'], len(compressed))
 
 
 if __name__ == '__main__':
