@@ -1,6 +1,7 @@
 """Offline DNF boundary tests; the DNF API itself is verified only in the planned CI."""
 import contextlib
 import copy
+import errno
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -120,6 +122,144 @@ def report():
             'rpm_before_after': state, 'configuration_before_after': state,
             'system_state_unchanged': True, 'rpm_downloaded': False, 'transaction_executed': False,
             'build_verified': False, 'crb_on_resolved': True}
+
+
+def trace_state():
+    return {'stage': 'identity', 'condition': 'none', 'package': 'none',
+            'failure': None, 'state_check': 'NOT_STARTED'}
+
+
+def failure_report():
+    return {'schema': w.SCHEMA, 'status': 'INCOMPLETE', 'stage': 'metadata_and_solver',
+            'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'diagnostic': {
+                'stage': 'metadata_load', 'condition': 'crb_off', 'package': 'none',
+                'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'exception_kind': 'OS_ERROR',
+                'errno': 'EROFS', 'state_check': 'MATCH'}}
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_exception_messages_filenames_and_unknown_class_names_are_not_serialized(self):
+        class SECRET_EXCEPTION(Exception):
+            pass
+        cases = [(PermissionError(errno.EACCES, 'SECRET', '/SECRET'), 'PERMISSION_ERROR', 'EACCES'),
+                 (OSError(errno.EROFS, 'SECRET', '/SECRET'), 'OS_ERROR', 'EROFS'),
+                 (ModuleNotFoundError('SECRET'), 'MODULE_NOT_FOUND', 'NONE'),
+                 (AttributeError('SECRET'), 'ATTRIBUTE_ERROR', 'NONE'),
+                 (TypeError('SECRET'), 'TYPE_ERROR', 'NONE'),
+                 (ValueError('SECRET'), 'VALUE_ERROR', 'NONE'),
+                 (SECRET_EXCEPTION('SECRET'), 'OTHER', 'NONE'),
+                 (w.Stop('SECRET'), 'STOP', 'NONE')]
+        for error, kind, code in cases:
+            t = trace_state()
+            w.remember_failure(t, error)
+            self.assertEqual((t['failure']['exception_kind'], t['failure']['errno']), (kind, code))
+            self.assertNotIn('SECRET', json.dumps(t))
+
+    def test_metadata_error_preserves_original_stage_after_state_checks(self):
+        base, t = Base(), trace_state()
+        base.fill_sack = Mock(side_effect=OSError(errno.EROFS, 'SECRET'))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(w, 'rpm_state', return_value={'count': 1}), \
+                patch.object(w, 'configuration_state', return_value={'count': 1}), \
+                self.assertRaises(OSError):
+            w.measure(fake_dnf(base), SimpleNamespace(), directory, t)
+        self.assertEqual(t['failure']['stage'], 'metadata_load')
+        self.assertEqual(t['failure']['condition'], 'crb_off')
+        self.assertEqual(t['failure']['errno'], 'EROFS')
+        self.assertEqual(t['state_check'], 'MATCH')
+        self.assertNotIn('SECRET', json.dumps(t))
+
+    def test_state_check_error_does_not_erase_first_failure(self):
+        for change in ('error', 'changed'):
+            base, t = Base(), trace_state()
+            base.fill_sack = Mock(side_effect=AttributeError('SECRET_PRIMARY'))
+            after = OSError(errno.EACCES, 'SECRET_SECONDARY') if change == 'error' else {'count': 2}
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.object(w, 'rpm_state', side_effect=[{'count': 1}, after]), \
+                    patch.object(w, 'configuration_state', return_value={'count': 1}), \
+                    self.assertRaises(OSError if change == 'error' else w.Stop):
+                w.measure(fake_dnf(base), SimpleNamespace(), directory, t)
+            self.assertEqual(t['failure']['stage'], 'metadata_load')
+            self.assertEqual(t['failure']['exception_kind'], 'ATTRIBUTE_ERROR')
+            self.assertEqual(t['state_check'], 'ERROR' if change == 'error' else 'CHANGED')
+            self.assertNotIn('SECRET', json.dumps(t))
+
+    def test_configuration_and_package_query_failures_have_distinct_checkpoints(self):
+        for which in ('configuration', 'query'):
+            base, t = Base(), trace_state()
+            if which == 'configuration':
+                base.conf.read.side_effect = AttributeError('SECRET')
+            else:
+                base.fill_sack = lambda **kw: setattr(base, 'sack', SimpleNamespace(
+                    query=Mock(side_effect=TypeError('SECRET'))))
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.object(w, 'rpm_state', return_value={'count': 1}), \
+                    patch.object(w, 'configuration_state', return_value={'count': 1}), \
+                    self.assertRaises(AttributeError if which == 'configuration' else TypeError):
+                w.measure(fake_dnf(base), SimpleNamespace(), directory, t)
+            self.assertEqual(t['failure']['stage'], 'configuration_read' if which == 'configuration'
+                             else 'candidate_query')
+            self.assertEqual(t['failure']['package'], 'none' if which == 'configuration' else 'gcc')
+
+    def test_worker_main_emits_enum_report_and_cancels_alarm_on_failure(self):
+        output = io.StringIO()
+        fake = SimpleNamespace(__version__='4.14.0')
+        with patch.dict(os.environ, {'RUBY_P1_DEPENDENCY_PROBE': '1'}, clear=True), \
+                patch.object(w.os, 'getuid', return_value=65534), \
+                patch.object(w.platform, 'system', return_value='Linux'), \
+                patch.object(w.platform, 'machine', return_value='x86_64'), \
+                patch.object(w.platform, 'python_version', return_value='3.9.19'), \
+                patch.object(w.Path, 'read_text', return_value='ID="centos"\nVERSION_ID="9"\n'), \
+                patch.dict(sys.modules, {'dnf': fake, 'rpm': SimpleNamespace()}), \
+                patch.object(w, 'rpm_state', side_effect=PermissionError(errno.EACCES, 'SECRET')), \
+                patch.object(w, 'silent_dependencies', side_effect=contextlib.nullcontext), \
+                patch.object(w.signal, 'signal'), patch.object(w.signal, 'alarm') as alarm, \
+                contextlib.redirect_stdout(output):
+            rc = w.main()
+        value = json.loads(output.getvalue())
+        self.assertEqual(rc, 3)
+        self.assertEqual(value['diagnostic']['stage'], 'rpm_before')
+        self.assertEqual(value['diagnostic']['state_check'], 'NOT_STARTED')
+        self.assertEqual(value['diagnostic']['errno'], 'EACCES')
+        self.assertEqual([c.args[0] for c in alarm.call_args_list], [510, 0])
+        self.assertEqual(h.failure_summary(output.getvalue(), w)['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertNotIn('SECRET', output.getvalue())
+
+    def test_native_output_suppression_is_unchanged_in_local_subprocess(self):
+        code = ('import importlib.util,os\n'
+                's=importlib.util.spec_from_file_location("worker",' + repr(str(ROOT / 'scripts/p1/dependency_container_probe.py')) + ')\n'
+                'w=importlib.util.module_from_spec(s);s.loader.exec_module(w)\n'
+                'with w.silent_dependencies():\n'
+                ' os.write(1,b"PRIVATE_STDOUT");os.write(2,b"PRIVATE_STDERR")\n'
+                'print("RESTORED")\n')
+        proc = subprocess.run([sys.executable, '-I', '-B', '-c', code], capture_output=True,
+                              text=True, timeout=10, check=True)
+        self.assertEqual(proc.stdout, 'RESTORED\n')
+        self.assertEqual(proc.stderr, '')
+
+    def test_failure_parser_rejects_extra_fields_unknown_enums_and_wrong_types(self):
+        mutations = [lambda v: v.update(detail='SECRET'),
+                     lambda v: v.update(schema='OLD'),
+                     lambda v: v.update(reason='SECRET'),
+                     lambda v: v.update(stage=['SECRET']),
+                     lambda v: v['diagnostic'].update(path='/SECRET'),
+                     lambda v: v['diagnostic'].update(stage='SECRET'),
+                     lambda v: v['diagnostic'].update(package='SECRET'),
+                     lambda v: v['diagnostic'].update(exception_kind='SECRET'),
+                     lambda v: v['diagnostic'].update(errno=13),
+                     lambda v: v['diagnostic'].update(state_check=True)]
+        for mutation in mutations:
+            value = failure_report()
+            mutation(value)
+            self.assertEqual(h.failure_summary(json.dumps(value), w), {'state': 'INVALID_SCHEMA'})
+
+    def test_failure_parser_rejects_duplicate_trailing_oversize_and_non_json(self):
+        original = json.dumps(failure_report())
+        values = [original.replace('"schema":', '"schema":"SECRET","schema":', 1),
+                  original + 'SECRET', '{"status":', 'SECRET', '[' * 2000, ' ' * 8193]
+        for value in values:
+            self.assertIn(h.failure_summary(value, w)['state'], ('INVALID_JSON', 'TOO_LARGE'))
+            self.assertNotIn('SECRET', json.dumps(h.failure_summary(value, w)))
 
 
 class WorkerTests(unittest.TestCase):
@@ -280,13 +420,14 @@ class HostTests(unittest.TestCase):
             self.assertFalse(path.exists())
             load_mock.assert_not_called()
 
-    def run_host(self, value=None, rc=0, stderr='', cleanup=True, timeout=False):
+    def run_host(self, value=None, rc=0, stderr='', cleanup=True, timeout=False, stdout=None):
         rt = SimpleNamespace(**{k: getattr(runtime, k) for k in ('DOCKER', 'TARGET', 'TARGET_CONFIG', 'TARGET_MANIFEST')})
         rt.command, rt.inspect_image, rt.cleanup = Mock(return_value=''), Mock(return_value={}), Mock(return_value=cleanup)
         inv = SimpleNamespace(now=lambda: '2026-11-15T00:00:00Z', registry_identity=lambda *a: {
             'platform_manifest_digest': runtime.TARGET_MANIFEST, 'config_digest': runtime.TARGET_CONFIG})
         modules = {'runtime_smoke': rt, 'env_probe': inv, 'dependency_container_probe': w}
-        proc = SimpleNamespace(returncode=rc, stdout=json.dumps(report() if value is None else value), stderr=stderr)
+        proc = SimpleNamespace(returncode=rc, stdout=(json.dumps(report() if value is None else value)
+                                                     if stdout is None else stdout), stderr=stderr)
         with tempfile.TemporaryDirectory() as directory, \
                 patch.dict(os.environ, {'CIRCLECI': 'true', 'CIRCLE_BRANCH': h.BRANCH}, clear=True), \
                 patch.object(h.platform, 'system', return_value='Linux'), \
@@ -328,6 +469,43 @@ class HostTests(unittest.TestCase):
             self.assertEqual((rc, value['reason']), (3, reason))
             self.assertNotIn('SECRET', json.dumps(value))
             rt.cleanup.assert_called_once()
+
+    def test_stderr_still_stops_but_valid_failure_diagnostic_survives(self):
+        rc, saved, _ = self.run_host(value=failure_report(), rc=3, stderr='SECRET')
+        self.assertEqual((rc, saved['status'], saved['reason']),
+                         (3, 'INCOMPLETE', 'WORKER_OUTPUT_REJECTED'))
+        self.assertEqual(saved['failure_diagnostic']['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertEqual(saved['failure_diagnostic']['diagnostic']['stage'], 'metadata_load')
+        self.assertTrue(saved['cleanup_confirmed'])
+        self.assertNotIn('measurement', saved)
+        self.assertNotIn('SECRET', json.dumps(saved))
+
+    def test_success_report_with_stderr_cannot_be_promoted_to_success(self):
+        rc, saved, _ = self.run_host(stderr='SECRET')
+        self.assertEqual((rc, saved['reason']), (3, 'WORKER_OUTPUT_REJECTED'))
+        self.assertEqual(saved['failure_diagnostic']['state'], 'NOT_A_FAILURE_REPORT')
+        self.assertNotIn('measurement', saved)
+
+    def test_malformed_worker_output_with_stderr_does_not_leak_or_pass(self):
+        for value in ('SECRET', '{"SECRET":', 'SECRET' * 60000):
+            rc, saved, _ = self.run_host(stdout=value, rc=3, stderr='SECRET')
+            self.assertEqual((rc, saved['reason']), (3, 'WORKER_OUTPUT_REJECTED'))
+            self.assertTrue(saved['cleanup_confirmed'])
+            self.assertNotIn('SECRET', json.dumps(saved))
+            self.assertNotIn('measurement', saved)
+
+    def test_cleanup_failure_has_priority_and_keeps_safe_diagnostic(self):
+        rc, saved, _ = self.run_host(value=failure_report(), rc=3, stderr='SECRET', cleanup=False)
+        self.assertEqual((rc, saved['reason']), (3, 'CLEANUP_UNCONFIRMED'))
+        self.assertEqual(saved['failure_diagnostic']['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertFalse(saved['cleanup_confirmed'])
+
+    def test_failure_without_stderr_retains_details_without_success(self):
+        rc, saved, _ = self.run_host(value=failure_report(), rc=3)
+        self.assertEqual((rc, saved['reason']), (3, 'DEPENDENCY_MEASUREMENT_INCOMPLETE'))
+        self.assertEqual(saved['failure_diagnostic']['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertFalse(saved['p1_03_complete'])
+        self.assertFalse(saved['phase1_complete'])
 
     def test_config_retains_gates_and_single_job(self):
         config = yaml.safe_load((ROOT / '.circleci/config.yml').read_text())

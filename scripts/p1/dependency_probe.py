@@ -122,15 +122,42 @@ def validate_condition(item, crb, worker):
         raise Stop('WORKER_SCHEMA')
 
 
-def failure_summary(value, _worker):
-    reasons = {'INVALID_PACKAGE_OR_REPO_FIELD', 'UNEXPECTED_PACKAGE_ORIGIN', 'PACKAGE_COUNT_LIMIT',
-               'RPM_DATABASE_LIMIT', 'CONFIGURATION_LIMIT', 'CONFIGURATION_TYPE_OR_SIZE',
-               'REPOSITORY_VERIFICATION_DISABLED', 'REPOSITORY_CREDENTIAL_OR_PROXY_PRESENT',
-               'REPOSITORY_URL_SCHEME', 'REPOSITORY_BASELINE_MISMATCH', 'SYSTEM_STATE_CHANGED',
-               'CONTAINER_IDENTITY_MISMATCH', 'WORKER_TIME_LIMIT', 'DNF_VERSION_UNSUPPORTED',
-               'DEPENDENCY_API_OR_METADATA_ERROR'}
-    reason = value.get('reason')
-    return {'reason': reason if type(reason) is str and reason in reasons else 'UNCLASSIFIED'}
+def failure_summary(stdout, worker):
+    """Extract a bounded enum-only failure report, never authorize a successful run."""
+    if len(stdout.encode()) > 8192:
+        return {'state': 'TOO_LARGE'}
+    try:
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError
+                value[key] = item
+            return value
+        value = json.loads(stdout, object_pairs_hook=unique)
+    except (ValueError, RecursionError):
+        return {'state': 'INVALID_JSON'}
+    if type(value) is not dict:
+        return {'state': 'INVALID_SCHEMA'}
+    if value.get('status') == worker.SUCCESS:
+        return {'state': 'NOT_A_FAILURE_REPORT'}
+    if (set(value) != {'schema', 'status', 'stage', 'reason', 'diagnostic'}
+            or value['schema'] != worker.SCHEMA or value['status'] != 'INCOMPLETE'
+            or type(value['stage']) is not str or value['stage'] not in ('identity', 'metadata_and_solver')
+            or type(value['reason']) is not str or value['reason'] not in worker.FAILURE_REASONS):
+        return {'state': 'INVALID_SCHEMA'}
+    detail = value['diagnostic']
+    allowed = {'stage': worker.STAGES, 'condition': ('none', 'crb_off', 'crb_on'),
+               'package': ('none', *worker.PACKAGES), 'reason': worker.FAILURE_REASONS,
+               'exception_kind': worker.EXCEPTION_KINDS,
+               'errno': ('NONE', 'OTHER', *worker.ERRNO_CODES.values()),
+               'state_check': worker.STATE_CHECKS}
+    if (type(detail) is not dict or set(detail) != set(allowed)
+            or any(type(detail[key]) is not str or detail[key] not in values
+                   for key, values in allowed.items())):
+        return {'state': 'INVALID_SCHEMA'}
+    return {'state': 'VALIDATED_FAILURE_ONLY', 'reason': value['reason'],
+            'worker_stage': value['stage'], 'diagnostic': {k: detail[k] for k in allowed}}
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
@@ -148,12 +175,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-dependency-run-r21', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-dependency-run-r22', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-dependency-r21'
+    name = 'ruby-p1-' + run_id + '-dependency-r22'
     handlers = {}
     try:
         def interrupted(_signum, _frame):
@@ -187,13 +214,16 @@ def main(argv=None):
         report['command'] = {'returncode': result.returncode,
                              'stdout_bytes': len(result.stdout.encode()),
                              'stderr_bytes': len(result.stderr.encode())}
-        if result.stderr or len(result.stdout.encode()) > 262144:
+        if len(result.stdout.encode()) > 262144:
+            raise Stop('WORKER_OUTPUT_REJECTED')
+        if result.stderr:
+            report['failure_diagnostic'] = failure_summary(result.stdout, worker)
             raise Stop('WORKER_OUTPUT_REJECTED')
         value = json.loads(result.stdout)
         if type(value) is not dict:
             raise Stop('WORKER_SCHEMA')
         if value.get('status') != worker.SUCCESS:
-            report['failure'] = failure_summary(value, worker)
+            report['failure_diagnostic'] = failure_summary(result.stdout, worker)
             raise Stop('DEPENDENCY_MEASUREMENT_INCOMPLETE')
         validate(value, worker)
         if result.returncode != 0:

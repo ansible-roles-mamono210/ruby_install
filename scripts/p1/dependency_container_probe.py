@@ -1,5 +1,6 @@
 """DNF metadata/solver measurement. Never download RPMs or execute transactions."""
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -16,13 +17,68 @@ SUCCESS = 'DEPENDENCY_SOLVER_MEASURED'
 PACKAGES = ('gcc', 'make', 'tar', 'gzip', 'ca-certificates', 'openssl-devel',
             'libyaml-devel', 'zlib-devel', 'libffi-devel')
 REPOS = ('baseos', 'appstream', 'crb')
-SCHEMA = 'ruby-p1-dependency-container-r21'
+SCHEMA = 'ruby-p1-dependency-container-r22'
 MAX_ROWS = 256
 TOKEN = re.compile(r'[A-Za-z0-9_+.~:^@-]{1,160}\Z')
+FAILURE_REASONS = frozenset({
+    'INVALID_PACKAGE_OR_REPO_FIELD', 'UNEXPECTED_PACKAGE_ORIGIN', 'PACKAGE_COUNT_LIMIT',
+    'RPM_DATABASE_LIMIT', 'CONFIGURATION_LIMIT', 'CONFIGURATION_TYPE_OR_SIZE',
+    'REPOSITORY_VERIFICATION_DISABLED', 'REPOSITORY_CREDENTIAL_OR_PROXY_PRESENT',
+    'REPOSITORY_URL_SCHEME', 'REPOSITORY_BASELINE_MISMATCH', 'SYSTEM_STATE_CHANGED',
+    'CONTAINER_IDENTITY_MISMATCH', 'WORKER_TIME_LIMIT', 'DNF_VERSION_UNSUPPORTED',
+    'DEPENDENCY_API_OR_METADATA_ERROR'})
+STAGES = frozenset({'identity', 'silence_setup', 'dnf_import', 'rpm_import', 'dnf_version',
+    'workspace_create', 'rpm_before', 'configuration_before', 'condition_workspace',
+    'base_open', 'configuration_read', 'transport_check', 'cache_directories',
+    'repository_read', 'repository_baseline', 'repository_transport', 'metadata_load',
+    'candidate_query', 'package_mark', 'solver', 'transaction_summary', 'base_close',
+    'rpm_after', 'configuration_after', 'state_compare', 'result_versions',
+    'workspace_cleanup', 'silence_restore'})
+EXCEPTION_KINDS = frozenset({'STOP', 'PERMISSION_ERROR', 'FILE_NOT_FOUND', 'TIMEOUT',
+    'OS_ERROR', 'MODULE_NOT_FOUND', 'IMPORT_ERROR', 'ATTRIBUTE_ERROR', 'TYPE_ERROR',
+    'VALUE_ERROR', 'KEY_ERROR', 'RUNTIME_ERROR', 'MEMORY_ERROR', 'OTHER'})
+ERRNO_CODES = {getattr(errno, n): n for n in
+               ('EACCES', 'EPERM', 'EROFS', 'ENOENT', 'ENOSPC', 'ENOMEM', 'ETIMEDOUT', 'EIO')}
+STATE_CHECKS = frozenset({'NOT_STARTED', 'PENDING', 'MATCH', 'CHANGED', 'ERROR'})
 
 
 class Stop(Exception):
     pass
+
+
+def mark(trace, stage):
+    if trace is not None:
+        trace['stage'] = stage
+
+
+def failure_reason(error):
+    if (type(error) is Stop and len(error.args) == 1 and type(error.args[0]) is str
+            and error.args[0] in FAILURE_REASONS):
+        return error.args[0]
+    return 'DEPENDENCY_API_OR_METADATA_ERROR'
+
+
+def remember_failure(trace, error):
+    """Record only fixed enums; never stringify exception text, paths or traceback."""
+    if trace is None or trace['failure'] is not None:
+        return
+    kind = 'OTHER'
+    for cls, label in ((Stop, 'STOP'), (PermissionError, 'PERMISSION_ERROR'),
+            (FileNotFoundError, 'FILE_NOT_FOUND'), (TimeoutError, 'TIMEOUT'),
+            (OSError, 'OS_ERROR'), (ModuleNotFoundError, 'MODULE_NOT_FOUND'),
+            (ImportError, 'IMPORT_ERROR'), (AttributeError, 'ATTRIBUTE_ERROR'),
+            (TypeError, 'TYPE_ERROR'), (ValueError, 'VALUE_ERROR'), (KeyError, 'KEY_ERROR'),
+            (RuntimeError, 'RUNTIME_ERROR'), (MemoryError, 'MEMORY_ERROR')):
+        if isinstance(error, cls):
+            kind = label
+            break
+    code = 'NONE'
+    if isinstance(error, OSError):
+        number = error.errno
+        code = ERRNO_CODES.get(number, 'OTHER') if type(number) is int else 'OTHER'
+    trace['failure'] = {'stage': trace['stage'], 'condition': trace['condition'],
+                        'package': trace['package'], 'reason': failure_reason(error),
+                        'exception_kind': kind, 'errno': code}
 
 
 def token(value):
@@ -95,16 +151,21 @@ def check_transport(conf):
                 raise Stop('REPOSITORY_URL_SCHEME')
 
 
-def configure(base, directory, crb):
+def configure(base, directory, crb, trace=None):
+    mark(trace, 'configuration_read')
     base.conf.read()
+    mark(trace, 'transport_check')
     check_transport(base.conf)
     base.conf.plugins = False
     base.conf.cacheonly = False
+    mark(trace, 'cache_directories')
     for key in ('cachedir', 'logdir', 'persistdir'):
         path = Path(directory) / key
         path.mkdir(exist_ok=True)
         setattr(base.conf, key, str(path))
+    mark(trace, 'repository_read')
     base.read_all_repos()
+    mark(trace, 'repository_baseline')
     if any(name not in base.repos for name in REPOS) or base.repos['crb'].enabled:
         raise Stop('REPOSITORY_BASELINE_MISMATCH')
     selected = REPOS if crb else REPOS[:2]
@@ -112,6 +173,7 @@ def configure(base, directory, crb):
     for repo in base.repos.values():
         repo.disable()
         if repo.id in selected:
+            mark(trace, 'repository_transport')
             check_transport(repo)
             repo.skip_if_unavailable = False
             repo.timeout = 20
@@ -120,15 +182,20 @@ def configure(base, directory, crb):
     return baseline, list(selected)
 
 
-def condition(dnf, directory, crb):
+def condition(dnf, directory, crb, trace=None):
     start = time.monotonic()
+    mark(trace, 'base_open')
     with dnf.Base() as base:
-        baseline, enabled = configure(base, directory, crb)
+        baseline, enabled = configure(base, directory, crb, trace)
+        mark(trace, 'metadata_load')
         base.fill_sack(load_system_repo=True, load_available_repos=True)
         result = {'crb': crb, 'baseline_enabled_repos': baseline, 'enabled_repos': enabled,
                   'candidates': [], 'missing': [], 'resolution': 'NOT_ATTEMPTED',
                   'install_set': [], 'remove_set': [], 'planned_replacements': []}
         for name in PACKAGES:
+            if trace is not None:
+                trace['package'] = name
+            mark(trace, 'candidate_query')
             installed = rows(base.sack.query().installed().filter(name=name), 8)
             available = rows(base.sack.query().available().filter(
                 name=name, arch=['x86_64', 'noarch']), 64)
@@ -142,8 +209,14 @@ def condition(dnf, directory, crb):
             try:
                 # Model state=present: already-installed requested packages are not marked for update.
                 for name in requested:
+                    if trace is not None:
+                        trace['package'] = name
+                    mark(trace, 'package_mark')
                     base.install(name, strict=True)
+                if trace is not None:
+                    trace['package'] = 'none'
                 if requested:
+                    mark(trace, 'solver')
                     base.resolve(allow_erasing=False)
             except dnf.exceptions.MarkingError:
                 result['resolution'] = 'MARKING_FAILED'
@@ -151,6 +224,7 @@ def condition(dnf, directory, crb):
                 result['resolution'] = 'DEPSOLVE_FAILED'
             else:
                 result['resolution'] = 'RESOLVED'
+                mark(trace, 'transaction_summary')
                 if requested and base.transaction is not None:
                     result['install_set'] = rows(base.transaction.install_set)
                     result['remove_set'] = rows(base.transaction.remove_set)
@@ -158,21 +232,53 @@ def condition(dnf, directory, crb):
                 remove_names = {p['name'] for p in result['remove_set']}
                 result['planned_replacements'] = sorted(install_names & remove_names)
         result['elapsed_seconds'] = round(time.monotonic() - start, 3)
+        if trace is not None:
+            trace['package'] = 'none'
+        mark(trace, 'base_close')
     return result
 
 
-def measure(dnf, rpm, directory):
-    before_rpm, before_config = rpm_state(rpm), configuration_state()
+def measure(dnf, rpm, directory, trace=None):
+    mark(trace, 'rpm_before')
+    before_rpm = rpm_state(rpm)
+    mark(trace, 'configuration_before')
+    before_config = configuration_state()
+    if trace is not None:
+        trace['state_check'] = 'PENDING'
     results = []
     try:
         # Two planned conditions, not a failure-triggered retry. Fresh per-condition cache.
         for crb in (False, True):
+            if trace is not None:
+                trace.update(condition='crb_on' if crb else 'crb_off', package='none')
+            mark(trace, 'condition_workspace')
             work = Path(directory) / ('crb-on' if crb else 'crb-off')
             work.mkdir()
-            results.append(condition(dnf, work, crb))
+            results.append(condition(dnf, work, crb, trace))
+    except Exception as error:
+        remember_failure(trace, error)
+        raise
     finally:
-        if rpm_state(rpm) != before_rpm or configuration_state() != before_config:
-            raise Stop('SYSTEM_STATE_CHANGED')
+        try:
+            if trace is not None:
+                trace.update(condition='none', package='none')
+            mark(trace, 'rpm_after')
+            after_rpm = rpm_state(rpm)
+            mark(trace, 'configuration_after')
+            after_config = configuration_state()
+            mark(trace, 'state_compare')
+            if after_rpm != before_rpm or after_config != before_config:
+                if trace is not None:
+                    trace['state_check'] = 'CHANGED'
+                raise Stop('SYSTEM_STATE_CHANGED')
+            if trace is not None:
+                trace['state_check'] = 'MATCH'
+        except Exception as error:
+            if trace is not None and trace['state_check'] != 'CHANGED':
+                trace['state_check'] = 'ERROR'
+            remember_failure(trace, error)
+            raise
+    mark(trace, 'result_versions')
     return {'schema': SCHEMA, 'status': SUCCESS, 'python': platform.python_version(),
             'dnf': token(str(dnf.__version__)), 'rpm': token(str(rpm.__version__)),
             'scope': 'metadata_and_solver_only', 'conditions': results,
@@ -200,6 +306,9 @@ def silent_dependencies():
 
 def main():
     result = {'schema': SCHEMA, 'status': 'INCOMPLETE', 'stage': 'identity'}
+    trace = {'stage': 'identity', 'condition': 'none', 'package': 'none',
+             'failure': None, 'state_check': 'NOT_STARTED'}
+    alarm_set = False
     try:
         if (os.environ.get('RUBY_P1_DEPENDENCY_PROBE') != '1' or os.getuid() != 65534
                 or platform.system() != 'Linux' or platform.machine() != 'x86_64'
@@ -215,20 +324,34 @@ def main():
             raise Stop('WORKER_TIME_LIMIT')
         signal.signal(signal.SIGALRM, expired)
         signal.alarm(510)
+        alarm_set = True
+        mark(trace, 'silence_setup')
         with silent_dependencies():
+            mark(trace, 'dnf_import')
             import dnf
+            mark(trace, 'rpm_import')
             import rpm
+            mark(trace, 'dnf_version')
             if not str(dnf.__version__).startswith('4.'):
                 raise Stop('DNF_VERSION_UNSUPPORTED')
             result['stage'] = 'metadata_and_solver'
+            mark(trace, 'workspace_create')
             with tempfile.TemporaryDirectory(prefix='ruby-p1-deps-') as directory:
-                measured = measure(dnf, rpm, directory)
-        signal.alarm(0)
+                measured = measure(dnf, rpm, directory, trace)
+                mark(trace, 'workspace_cleanup')
+            mark(trace, 'silence_restore')
         result = measured
     except Stop as error:
-        result['reason'] = str(error)
-    except Exception:
+        remember_failure(trace, error)
+        result['reason'] = failure_reason(error)
+    except Exception as error:
+        remember_failure(trace, error)
         result['reason'] = 'DEPENDENCY_API_OR_METADATA_ERROR'
+    finally:
+        if alarm_set:
+            signal.alarm(0)
+    if result['status'] != SUCCESS:
+        result['diagnostic'] = dict(trace['failure'], state_check=trace['state_check'])
     print(json.dumps(result, sort_keys=True))
     return 0 if result['status'] == SUCCESS else 3
 
