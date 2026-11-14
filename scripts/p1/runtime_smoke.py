@@ -99,6 +99,7 @@ def controller_args(name, target, run_id, directory, socket_gid):
                      '--group-add', str(socket_gid),
                      '--mount', 'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock,readonly',
                      '--mount', 'type=bind,src=' + str(directory) + ',dst=/p1,readonly',
+                     '--env', 'ANSIBLE_LOCAL_TEMP=/tmp/ruby-p1-runtime-local',
                      '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'NO_COLOR=1',
                      '--entrypoint', 'python3', CONTROLLER_CONFIG,
                      '-B', '/p1/runtime_controller.py', target]
@@ -199,6 +200,13 @@ def main(argv=None):
                 attempt = {'status': 'INCOMPLETE'}
                 if value.get('stage') in ('preflight', 'ansible_playbook'):
                     attempt['stage'] = value['stage']
+                if value.get('checkpoint') in (
+                        'controller_identity', 'collection_manifest', 'constants_import',
+                        'collection_settings', 'environment_copy', 'workspace_create',
+                        'config_write', 'inventory_write', 'playbook_lookup',
+                        'playbook_execute', 'playbook_result', 'callback_decode',
+                        'callback_schema', 'workspace_cleanup'):
+                    attempt['checkpoint'] = value['checkpoint']
                 counts = value.get('command', {})
                 if (set(counts) == {'returncode', 'stdout_bytes', 'stderr_bytes'}
                         and all(type(x) is int for x in counts.values())):

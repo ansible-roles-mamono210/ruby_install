@@ -1,5 +1,6 @@
 """Offline boundary, protocol, and failure tests; never contacts Docker/Ansible."""
 import contextlib
+import builtins
 import copy
 import importlib.util
 import io
@@ -27,6 +28,7 @@ def load(name):
 
 
 h = load('runtime_smoke')
+c = load('runtime_controller')
 t = load('runtime_target')
 p = load('runtime_protocol')
 
@@ -141,6 +143,149 @@ class RuntimeTargetTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(t.main(), 3)
         self.assertNotIn('SECRET', out.getvalue())
+
+
+class RuntimeControllerTests(unittest.TestCase):
+    """Exercise real control flow/files with fault injection, without Ansible."""
+
+    def run_controller(self, fault=None, paths=None, scan=True, result=None):
+        paths = ['/original/collections', '/usr/share/ansible/collections',
+                 '/original/collections'] if paths is None else paths
+        if result is None:
+            result = subprocess.CompletedProcess([], 0, json.dumps(valid_report()['ansible']), '')
+        real_import = builtins.__import__
+        real_write = Path.write_text
+        real_temporary = tempfile.TemporaryDirectory
+        captured = {}
+        args = h.controller_args('controller', 'target', 'run', '/tmp/dedicated', 123)
+        launcher_env = dict(args[i + 1].split('=', 1) for i, arg in enumerate(args) if arg == '--env')
+        launcher_env['HOME'] = '/home/circleci'
+
+        def imported(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == 'ansible' and 'constants' in fromlist:
+                # Regression oracle: a read-only home cannot be the import-time temp.
+                self.assertEqual(os.environ['ANSIBLE_LOCAL_TEMP'], '/tmp/ruby-p1-runtime-local')
+                self.assertNotIn('ANSIBLE_HOME', os.environ)
+                self.assertEqual(os.environ['HOME'], '/home/circleci')
+                if fault == 'constants_import':
+                    raise OSError('SECRET import failure')
+                captured['constants_imported'] = True
+                return SimpleNamespace(constants=SimpleNamespace(
+                    COLLECTIONS_PATHS=paths, COLLECTIONS_SCAN_SYS_PATH=scan))
+            return real_import(name, globals, locals, fromlist, level)
+
+        def write(path, text, *a, **kw):
+            if ((fault == 'config_write' and path.name == 'ansible.cfg') or
+                    (fault == 'inventory_write' and path.name == 'inventory.json')):
+                raise PermissionError('SECRET file failure')
+            return real_write(path, text, *a, **kw)
+
+        @contextlib.contextmanager
+        def temporary(*a, **kw):
+            if fault == 'workspace_create':
+                raise OSError('SECRET temporary directory failure')
+            with real_temporary(*a, **kw) as value:
+                yield value
+                if fault == 'workspace_cleanup':
+                    raise OSError('SECRET cleanup failure')
+
+        def execute(argv, **kw):
+            captured['env'] = kw['env'].copy()
+            captured['config'] = Path(kw['env']['ANSIBLE_CONFIG']).read_text()
+            captured['inventory'] = json.loads(Path(argv[2]).read_text())
+            self.assertEqual(kw['timeout'], 180)
+            if fault == 'playbook_execute':
+                raise subprocess.TimeoutExpired(argv, 180, output='SECRET')
+            return result
+
+        with real_temporary() as manifest_root:
+            manifest = Path(manifest_root) / 'community/docker/MANIFEST.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({'collection_info': {'version':
+                                '0.0.0' if fault == 'collection_manifest' else '5.4.0'}}))
+            with patch.object(c, 'COLLECTION_ROOT', manifest_root), \
+                    patch.object(c.sys, 'argv', ['runtime_controller.py', 'ruby-p1-' + 'a' * 32 + '-runtime-target']), \
+                    patch.object(c.os, 'getuid', return_value=0 if fault == 'controller_identity' else 1000), \
+                    patch.object(c.platform, 'python_version', return_value='3.14.10'), \
+                    patch.object(c.importlib.metadata, 'version', return_value='2.21.6'), \
+                    patch.dict(c.os.environ, launcher_env, clear=True), \
+                    patch.object(builtins, '__import__', side_effect=imported), \
+                    patch.object(c.Path, 'write_text', new=write), \
+                    patch.object(c.tempfile, 'TemporaryDirectory', side_effect=temporary), \
+                    patch.object(c.shutil, 'which', return_value=None if fault == 'playbook_lookup' else '/fixed/ansible-playbook'), \
+                    patch.object(c.subprocess, 'run', side_effect=execute) as run, \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                before = dict(os.environ)
+                rc = c.main()
+                self.assertEqual(dict(os.environ), before)
+            output = out.getvalue()
+            self.assertNotIn('SECRET', output)
+            return rc, json.loads(output), run.call_count, captured
+
+    def test_import_has_writable_temp_and_child_preserves_search_settings(self):
+        rc, report, calls, captured = self.run_controller(scan=False)
+        self.assertEqual((rc, calls), (0, 1))
+        p.validate_report(report)
+        self.assertNotIn('checkpoint', report)
+        self.assertTrue(captured['constants_imported'])
+        self.assertEqual(captured['env']['ANSIBLE_COLLECTIONS_PATH'],
+                         '/original/collections:/usr/share/ansible/collections:/original/collections')
+        self.assertEqual(captured['env']['ANSIBLE_COLLECTIONS_SCAN_SYS_PATH'], 'false')
+        self.assertEqual(captured['env']['ANSIBLE_HOME'], '/tmp/ruby-p1-runtime-home')
+        self.assertEqual(captured['env']['ANSIBLE_LOCAL_TEMP'], '/tmp/ruby-p1-runtime-local')
+
+    def test_missing_launcher_temp_reproduces_preflight_stop_in_stub(self):
+        args = h.controller_args('controller', 'target', 'run', '/tmp/dedicated', 123)
+        index = args.index('ANSIBLE_LOCAL_TEMP=/tmp/ruby-p1-runtime-local')
+        del args[index - 1:index + 1]
+        with patch.object(h, 'controller_args', return_value=args):
+            rc, report, calls, _ = self.run_controller()
+        self.assertEqual((rc, calls), (3, 0))
+        self.assertEqual(report['checkpoint'], 'constants_import')
+
+    def test_preflight_faults_stop_before_playbook_and_identify_checkpoint(self):
+        for fault in ('controller_identity', 'collection_manifest', 'constants_import',
+                      'workspace_create', 'config_write', 'inventory_write', 'playbook_lookup'):
+            with self.subTest(fault=fault):
+                rc, report, calls, _ = self.run_controller(fault=fault)
+                self.assertEqual((rc, calls), (3, 0))
+                self.assertEqual(report['stage'], 'preflight')
+                self.assertEqual(report['checkpoint'], fault)
+                self.assertEqual(report['reason'], 'RUNTIME_UNCONFIRMED')
+
+    def test_invalid_search_paths_do_not_fall_back_or_start_playbook(self):
+        for paths, scan in (([], True), (['relative'], True), (['/a:/b'], True),
+                            (['/a\nSECRET'], True), (['/valid'], 'true')):
+            with self.subTest(paths=paths, scan=scan):
+                rc, report, calls, _ = self.run_controller(paths=paths, scan=scan)
+                self.assertEqual((rc, calls), (3, 0))
+                self.assertEqual(report['checkpoint'], 'collection_settings')
+
+    def test_playbook_failure_or_warning_is_not_accepted(self):
+        for result in (subprocess.CompletedProcess([], 2, 'SECRET', ''),
+                       subprocess.CompletedProcess([], 0, 'SECRET', 'warning SECRET')):
+            rc, report, calls, _ = self.run_controller(result=result)
+            self.assertEqual((rc, calls), (3, 1))
+            self.assertEqual(report['checkpoint'], 'playbook_result')
+
+    def test_timeout_has_no_raw_command_output(self):
+        rc, report, calls, _ = self.run_controller(fault='playbook_execute')
+        self.assertEqual((rc, calls), (3, 1))
+        self.assertEqual(report['checkpoint'], 'playbook_execute')
+        self.assertNotIn('command', report)
+
+    def test_callback_decode_and_schema_failures_are_distinct(self):
+        for stdout, checkpoint in (('SECRET', 'callback_decode'),
+                                   ('{"status":"SECRET"}', 'callback_schema')):
+            rc, report, calls, _ = self.run_controller(result=subprocess.CompletedProcess([], 0, stdout, ''))
+            self.assertEqual((rc, calls), (3, 1))
+            self.assertEqual(report['checkpoint'], checkpoint)
+
+    def test_temporary_cleanup_failure_cannot_leave_passed_status(self):
+        rc, report, calls, _ = self.run_controller(fault='workspace_cleanup')
+        self.assertEqual((rc, calls), (3, 1))
+        self.assertEqual(report['checkpoint'], 'workspace_cleanup')
+        self.assertEqual(report['status'], 'INCOMPLETE')
 
 
 class RuntimeHostTests(unittest.TestCase):
@@ -280,6 +425,24 @@ class RuntimeHostTests(unittest.TestCase):
         self.assertNotIn('SECRET', json.dumps(result))
         self.assertEqual(result['runtime_attempt']['command']['returncode'], 2)
         self.assertFalse(result['fixture_become_verified'])
+
+    def test_checkpoint_is_allowlisted_and_never_promotes_incomplete(self):
+        for checkpoint in ('controller_identity', 'collection_manifest', 'constants_import',
+                           'collection_settings', 'environment_copy', 'workspace_create',
+                           'config_write', 'inventory_write', 'playbook_lookup',
+                           'playbook_execute', 'playbook_result', 'callback_decode',
+                           'callback_schema', 'workspace_cleanup', 'SECRET', ['SECRET'], None):
+            value = {'status': 'INCOMPLETE', 'stage': 'preflight', 'checkpoint': checkpoint,
+                     'reason': 'SECRET', 'unexpected': 'SECRET'}
+            with self.subTest(checkpoint=checkpoint):
+                rc, result, clean_count, _ = self.mocked_main(value, controller_rc=3)
+                self.assertEqual((rc, clean_count), (3, 2))
+                self.assertNotIn('SECRET', json.dumps(result))
+                self.assertFalse(result['fixture_become_verified'])
+                if isinstance(checkpoint, str) and checkpoint != 'SECRET':
+                    self.assertEqual(result['runtime_attempt']['checkpoint'], checkpoint)
+                else:
+                    self.assertNotIn('checkpoint', result['runtime_attempt'])
 
     def test_cleanup_failure_prevents_overall_success(self):
         rc, result, _, _ = self.mocked_main(cleanup_ok=False)
