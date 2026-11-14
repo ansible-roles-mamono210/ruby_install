@@ -106,6 +106,7 @@ class Base:
 
 def fake_dnf(base):
     return SimpleNamespace(Base=lambda: base, __version__='4.14.0',
+                           const=SimpleNamespace(TMPDIR='/var/tmp/'),
                            exceptions=SimpleNamespace(MarkingError=MarkingError, DepsolveError=DepsolveError))
 
 
@@ -135,6 +136,108 @@ def failure_report():
                 'stage': 'metadata_load', 'condition': 'crb_off', 'package': 'none',
                 'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'exception_kind': 'OS_ERROR',
                 'errno': 'EROFS', 'state_check': 'MATCH'}}
+
+
+class TemporaryRootTests(unittest.TestCase):
+    def test_base_constructor_and_close_share_private_cache_root(self):
+        events = []
+        class ClosingBase(Base):
+            def __exit__(self, *args):
+                events.append(('close', dnf.const.TMPDIR))
+        base = ClosingBase()
+        dnf = fake_dnf(base)
+        def construct():
+            path = Path(dnf.const.TMPDIR)
+            self.assertEqual(path.parent, Path(directory))
+            self.assertEqual(path.name, 'dnf-bootstrap')
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            events.append(('construct', str(path)))
+            return base
+        dnf.Base = Mock(side_effect=construct)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(w.condition(dnf, directory, True)['resolution'], 'RESOLVED')
+        self.assertEqual([e[0] for e in events], ['construct', 'close'])
+        self.assertEqual(events[0][1], events[1][1])
+        self.assertEqual(dnf.const.TMPDIR, '/var/tmp/')
+        self.assertFalse(Path(events[0][1]).exists())
+
+    def test_constructor_failure_restores_constant_and_preserves_diagnostic(self):
+        class DnfError(Exception):
+            pass
+        dnf, trace = fake_dnf(Base()), trace_state()
+        dnf.Base = Mock(side_effect=DnfError('SECRET'))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(w, 'rpm_state', return_value={'count': 1}), \
+                patch.object(w, 'configuration_state', return_value={'count': 1}), \
+                self.assertRaises(DnfError):
+            w.measure(dnf, SimpleNamespace(), directory, trace)
+        self.assertEqual(dnf.const.TMPDIR, '/var/tmp/')
+        self.assertEqual(trace['failure']['stage'], 'base_open')
+        self.assertEqual(trace['failure']['condition'], 'crb_off')
+        self.assertEqual(trace['state_check'], 'MATCH')
+        self.assertNotIn('SECRET', json.dumps(trace))
+        dnf.Base.assert_called_once_with()
+
+    def test_metadata_failure_closes_before_restoration(self):
+        roots = []
+        class ClosingBase(Base):
+            def __exit__(self, *args):
+                roots.append(dnf.const.TMPDIR)
+        base = ClosingBase()
+        base.fill_sack = Mock(side_effect=RuntimeError('SECRET'))
+        dnf = fake_dnf(base)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(RuntimeError):
+                w.condition(dnf, directory, False)
+            self.assertEqual(roots, [str(Path(directory) / 'dnf-bootstrap')])
+        self.assertEqual(dnf.const.TMPDIR, '/var/tmp/')
+
+    def test_close_failure_still_restores_constant(self):
+        class BadClose(Base):
+            def __exit__(self, *args):
+                raise OSError(errno.EIO, 'SECRET')
+        dnf = fake_dnf(BadClose())
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(OSError):
+            w.condition(dnf, directory, True)
+        self.assertEqual(dnf.const.TMPDIR, '/var/tmp/')
+
+    def test_unexpected_default_stops_before_directory_or_base_creation(self):
+        for value in ('/tmp', '/SECRET', '', None, 1):
+            dnf = fake_dnf(Base())
+            dnf.const.TMPDIR = value
+            dnf.Base = Mock()
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(w.Stop, '^DNF_TEMP_ROOT_UNEXPECTED$'):
+                    w.condition(dnf, directory, True)
+                self.assertEqual(list(Path(directory).iterdir()), [])
+            dnf.Base.assert_not_called()
+            self.assertEqual(dnf.const.TMPDIR, value)
+
+    def test_directory_failure_stops_before_base_and_leaves_constant(self):
+        dnf = fake_dnf(Base())
+        dnf.Base = Mock()
+        with patch.object(w.Path, 'mkdir', side_effect=PermissionError(errno.EACCES, 'SECRET')), \
+                self.assertRaises(PermissionError):
+            w.condition(dnf, '/tmp/not-created', True)
+        dnf.Base.assert_not_called()
+        self.assertEqual(dnf.const.TMPDIR, '/var/tmp/')
+
+    def test_conditions_use_distinct_roots_and_restore_exact_original(self):
+        dnf = fake_dnf(Base())
+        dnf.const.TMPDIR = '/var/tmp'
+        roots = []
+        def construct():
+            roots.append(dnf.const.TMPDIR)
+            return Base()
+        dnf.Base = construct
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(w, 'rpm_state', return_value={'count': 1}), \
+                patch.object(w, 'configuration_state', return_value={'count': 1}):
+            value = w.measure(dnf, SimpleNamespace(__version__='4.16.1.3'), directory)
+            self.assertTrue(value['system_state_unchanged'])
+            self.assertEqual(roots, [str(Path(directory) / c / 'dnf-bootstrap')
+                                     for c in ('crb-off', 'crb-on')])
+            self.assertEqual(dnf.const.TMPDIR, '/var/tmp')
 
 
 class DiagnosticTests(unittest.TestCase):

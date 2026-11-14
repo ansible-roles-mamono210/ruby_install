@@ -17,7 +17,7 @@ SUCCESS = 'DEPENDENCY_SOLVER_MEASURED'
 PACKAGES = ('gcc', 'make', 'tar', 'gzip', 'ca-certificates', 'openssl-devel',
             'libyaml-devel', 'zlib-devel', 'libffi-devel')
 REPOS = ('baseos', 'appstream', 'crb')
-SCHEMA = 'ruby-p1-dependency-container-r22'
+SCHEMA = 'ruby-p1-dependency-container-r23'
 MAX_ROWS = 256
 TOKEN = re.compile(r'[A-Za-z0-9_+.~:^@-]{1,160}\Z')
 FAILURE_REASONS = frozenset({
@@ -26,10 +26,10 @@ FAILURE_REASONS = frozenset({
     'REPOSITORY_VERIFICATION_DISABLED', 'REPOSITORY_CREDENTIAL_OR_PROXY_PRESENT',
     'REPOSITORY_URL_SCHEME', 'REPOSITORY_BASELINE_MISMATCH', 'SYSTEM_STATE_CHANGED',
     'CONTAINER_IDENTITY_MISMATCH', 'WORKER_TIME_LIMIT', 'DNF_VERSION_UNSUPPORTED',
-    'DEPENDENCY_API_OR_METADATA_ERROR'})
+    'DEPENDENCY_API_OR_METADATA_ERROR', 'DNF_TEMP_ROOT_UNEXPECTED'})
 STAGES = frozenset({'identity', 'silence_setup', 'dnf_import', 'rpm_import', 'dnf_version',
     'workspace_create', 'rpm_before', 'configuration_before', 'condition_workspace',
-    'base_open', 'configuration_read', 'transport_check', 'cache_directories',
+    'temporary_root', 'base_open', 'configuration_read', 'transport_check', 'cache_directories',
     'repository_read', 'repository_baseline', 'repository_transport', 'metadata_load',
     'candidate_query', 'package_mark', 'solver', 'transaction_summary', 'base_close',
     'rpm_after', 'configuration_after', 'state_compare', 'result_versions',
@@ -182,10 +182,28 @@ def configure(base, directory, crb, trace=None):
     return baseline, list(selected)
 
 
+@contextlib.contextmanager
+def temporary_root(dnf, directory, trace=None):
+    # DNF 4's non-root Conf constructor calls getCacheDir before conf can be set.
+    # Keep that bootstrap cache and later lock helpers in the existing /tmp tmpfs.
+    # This is an internal DNF constant, scoped to this single-threaded worker.
+    mark(trace, 'temporary_root')
+    original = getattr(dnf.const, 'TMPDIR', None)
+    if type(original) is not str or original not in ('/var/tmp', '/var/tmp/'):
+        raise Stop('DNF_TEMP_ROOT_UNEXPECTED')
+    cache_root = Path(directory) / 'dnf-bootstrap'
+    cache_root.mkdir(mode=0o700)
+    dnf.const.TMPDIR = str(cache_root)
+    try:
+        mark(trace, 'base_open')
+        yield
+    finally:
+        dnf.const.TMPDIR = original
+
+
 def condition(dnf, directory, crb, trace=None):
     start = time.monotonic()
-    mark(trace, 'base_open')
-    with dnf.Base() as base:
+    with temporary_root(dnf, directory, trace), dnf.Base() as base:
         baseline, enabled = configure(base, directory, crb, trace)
         mark(trace, 'metadata_load')
         base.fill_sack(load_system_repo=True, load_available_repos=True)
@@ -336,7 +354,7 @@ def main():
                 raise Stop('DNF_VERSION_UNSUPPORTED')
             result['stage'] = 'metadata_and_solver'
             mark(trace, 'workspace_create')
-            with tempfile.TemporaryDirectory(prefix='ruby-p1-deps-') as directory:
+            with tempfile.TemporaryDirectory(prefix='ruby-p1-deps-', dir='/tmp') as directory:
                 measured = measure(dnf, rpm, directory, trace)
                 mark(trace, 'workspace_cleanup')
             mark(trace, 'silence_restore')

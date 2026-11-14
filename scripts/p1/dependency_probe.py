@@ -175,12 +175,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-dependency-run-r22', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-dependency-run-r23', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-dependency-r22'
+    name = 'ruby-p1-' + run_id + '-dependency-r23'
     handlers = {}
     try:
         def interrupted(_signum, _frame):
