@@ -43,6 +43,7 @@
           - "{{ lookup('ansible.builtin.file', '/p1/runtime_target.py') }}"
           - baseline
       changed_when: false
+      register: p1_baseline
       no_log: true
 
     - name: P1 create disposable fixture
@@ -55,6 +56,7 @@
           - "{{ lookup('ansible.builtin.file', '/p1/runtime_target.py') }}"
           - fixture
       changed_when: true
+      register: p1_fixture
       no_log: true
 
     - name: P1 nonroot identity
@@ -64,6 +66,7 @@
         ansible_user: ruby_p1_probe
       become: false
       changed_when: false
+      register: p1_nonroot
       no_log: true
 
     - name: P1 become identity
@@ -76,4 +79,35 @@
       become_user: root
       become_flags: -H -S -n
       changed_when: false
+      register: p1_become
       no_log: true
+
+    # Keep original results private. Only the enumerated measurement fields
+    # enter the stdout callback; it validates them before emitting any values.
+    - name: P1 publish bounded measurements
+      ansible.builtin.debug:
+        msg:
+          schema: ruby-p1-runtime-publication-r16
+          facts:
+            ansible_distribution: "{{ p1_facts.ansible_facts.ansible_distribution }}"
+            ansible_distribution_major_version: "{{ p1_facts.ansible_facts.ansible_distribution_major_version }}"
+            ansible_python_version: "{{ p1_facts.ansible_facts.ansible_python_version }}"
+            ansible_user_uid: "{{ p1_facts.ansible_facts.ansible_user_uid }}"
+          commands:
+            P1 stock baseline:
+              rc: "{{ p1_baseline.rc }}"
+              stdout: "{{ p1_baseline.stdout }}"
+              stderr_present: "{{ p1_baseline.stderr != '' }}"
+            P1 create disposable fixture:
+              rc: "{{ p1_fixture.rc }}"
+              stdout: "{{ p1_fixture.stdout }}"
+              stderr_present: "{{ p1_fixture.stderr != '' }}"
+            P1 nonroot identity:
+              rc: "{{ p1_nonroot.rc }}"
+              stdout: "{{ p1_nonroot.stdout }}"
+              stderr_present: "{{ p1_nonroot.stderr != '' }}"
+            P1 become identity:
+              rc: "{{ p1_become.rc }}"
+              stdout: "{{ p1_become.stdout }}"
+              stderr_present: "{{ p1_become.stderr != '' }}"
+      no_log: false

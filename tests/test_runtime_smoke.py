@@ -36,6 +36,15 @@ with patch.dict(sys.modules, {'runtime_protocol': p}):
     c = load('runtime_controller')
 
 
+# Exercise the real callback class with event doubles, without Ansible or Docker.
+with patch.dict(sys.modules, {
+        'runtime_protocol': p,
+        'ansible': SimpleNamespace(),
+        'ansible.plugins': SimpleNamespace(),
+        'ansible.plugins.callback': SimpleNamespace(CallbackBase=object)}):
+    callback = load('runtime_callback')
+
+
 def baseline():
     path = {'path': '/usr/sbin:/usr/bin', 'uid': 0, 'euid': 0,
             'commands': {k: None for k in p.COMMANDS}}
@@ -56,6 +65,210 @@ def valid_report():
             'stage': 'finished', 'command': {'returncode': 0, 'stdout_bytes': 2000, 'stderr_bytes': 0},
             'ansible': {'schema': 'ruby-p1-ansible-runtime-r11', 'status': 'PASSED',
                         'measurements': dict(zip(p.TASKS, values))}}
+
+
+def publication():
+    values = valid_report()['ansible']['measurements']
+    commands = {}
+    for name in p.TASKS[2:]:
+        stdout = (str(values[name]['euid']) if name in p.TASKS[4:]
+                  else json.dumps(values[name]))
+        commands[name] = {'rc': 0, 'stdout': stdout + '\n', 'stderr_present': False}
+    return {'schema': 'ruby-p1-runtime-publication-r16',
+            'facts': values[p.TASKS[0]], 'commands': commands}
+
+
+class PrivateEvent:
+    def __init__(self, name, *, public=False, payload=None, host='target'):
+        self.task_name = name
+        self.task = SimpleNamespace(no_log=not public, get_name=lambda: name)
+        self.host = SimpleNamespace(get_name=lambda: host)
+        self.warnings = []
+        self.deprecations = []
+        self.is_failed = lambda: False
+        self.is_skipped = lambda: False
+        self.is_unreachable = lambda: False
+        self.public = public
+        self.payload = payload
+        self.raw_reads = 0
+
+    @property
+    def result(self):
+        self.raw_reads += 1
+        if not self.public:
+            raise AssertionError('private result must never be read')
+        return {'msg': self.payload, 'invocation': {'SECRET': 'not for publication'}}
+
+
+class RuntimeCallbackTests(unittest.TestCase):
+    def new(self):
+        cb = callback.CallbackModule()
+        cb._display = SimpleNamespace(display=Mock())
+        return cb
+
+    def events(self):
+        return [PrivateEvent(name) for name in p.TASKS] + [
+            PrivateEvent(callback.PUBLICATION, public=True, payload=publication())]
+
+    def run_events(self, events):
+        cb = self.new()
+        for event in events:
+            cb.v2_runner_on_ok(event)
+        cb.v2_playbook_on_stats(None)
+        cb._display.display.assert_called_once()
+        return cb, json.loads(cb._display.display.call_args.args[0])
+
+    def assert_incomplete(self, events):
+        cb, result = self.run_events(events)
+        self.assertEqual(result['status'], 'INCOMPLETE')
+        self.assertEqual(result['measurements'], {})
+        self.assertNotIn('SECRET', json.dumps(result))
+        return cb
+
+    def test_private_results_are_never_read_and_complete_publication_passes(self):
+        events = self.events()
+        cb, result = self.run_events(events)
+        self.assertEqual(result, valid_report()['ansible'])
+        self.assertTrue(all(event.raw_reads == 0 for event in events[:-1]))
+        self.assertEqual(events[-1].raw_reads, 1)
+        report = valid_report()
+        report['ansible'] = result
+        self.assertIs(p.validate_report(report), report)
+        self.assertNotIn('SECRET', cb._display.display.call_args.args[0])
+
+    def test_publication_is_required_after_all_six_ok_events(self):
+        self.assert_incomplete(self.events()[:-1])
+        for i in range(len(p.TASKS)):
+            with self.subTest(missing=i):
+                events = self.events()
+                del events[i]
+                self.assert_incomplete(events)
+
+    def test_duplicate_unknown_and_out_of_order_events_stop(self):
+        original = self.events()
+        cases = [original[:1] + original, original + original[-1:],
+                 [original[1], original[0]] + original[2:],
+                 original[:-1] + [PrivateEvent('SECRET unknown task')],
+                 original[-1:] + original]
+        for events in cases:
+            with self.subTest(events=events):
+                self.assert_incomplete(events)
+
+    def test_wrong_host_and_changed_no_log_policy_stop(self):
+        for i in range(7):
+            for field in ('host', 'no_log'):
+                with self.subTest(i=i, field=field):
+                    events = self.events()
+                    if field == 'host':
+                        events[i].host = SimpleNamespace(get_name=lambda: 'other')
+                    else:
+                        events[i].task.no_log = not events[i].task.no_log
+                    self.assert_incomplete(events)
+
+    def test_warning_and_deprecation_metadata_stop_without_rendering(self):
+        for i in range(7):
+            for field in ('warnings', 'deprecations'):
+                with self.subTest(i=i, field=field):
+                    events = self.events()
+                    setattr(events[i], field, ['SECRET warning'])
+                    self.assert_incomplete(events)
+                    self.assertTrue(all(event.raw_reads == 0 for event in events[:i + 1]))
+
+    def test_failure_skip_and_unreachable_metadata_stop(self):
+        for i in range(7):
+            for field in ('is_failed', 'is_skipped', 'is_unreachable'):
+                with self.subTest(i=i, field=field):
+                    events = self.events()
+                    setattr(events[i], field, lambda: True)
+                    self.assert_incomplete(events)
+
+    def test_failed_event_is_sticky_even_when_later_events_pass(self):
+        for method in ('v2_runner_on_failed', 'v2_runner_on_skipped', 'v2_runner_on_unreachable'):
+            with self.subTest(method=method):
+                cb = self.new()
+                getattr(cb, method)(PrivateEvent(p.TASKS[0]))
+                for event in self.events():
+                    cb.v2_runner_on_ok(event)
+                cb.v2_playbook_on_stats(None)
+                self.assertEqual(json.loads(cb._display.display.call_args.args[0])['measurements'], {})
+                self.assertTrue(cb.failed)
+
+    def test_extra_or_missing_publication_fields_stop_without_partial_values(self):
+        changes = [lambda x: x.update(SECRET='not allowed'),
+                   lambda x: x.pop('schema'),
+                   lambda x: x.update(schema='wrong'),
+                   lambda x: x['facts'].update(ansible_env={'SECRET': 'value'}),
+                   lambda x: x['commands'].pop(p.TASKS[2]),
+                   lambda x: x['commands'].update(SECRET={}),
+                   lambda x: x['commands'][p.TASKS[2]].update(stderr='SECRET')]
+        for change in changes:
+            with self.subTest(change=change):
+                events = self.events()
+                change(events[-1].payload)
+                self.assert_incomplete(events)
+
+    def test_command_failure_stderr_bad_types_and_oversize_stop(self):
+        changes = [{'rc': 1}, {'rc': False}, {'rc': '0'}, {'stderr_present': True},
+                   {'stderr_present': 0}, {'stdout': {'SECRET': 'value'}},
+                   {'stdout': 'SECRET' * 6000}]
+        for name in p.TASKS[2:]:
+            for change in changes:
+                with self.subTest(name=name, change=change):
+                    events = self.events()
+                    events[-1].payload['commands'][name].update(change)
+                    self.assert_incomplete(events)
+
+    def test_malformed_probe_output_and_wrong_identities_still_stop(self):
+        for name, stdout in [(p.TASKS[2], '{SECRET'), (p.TASKS[3], '{}'),
+                             (p.TASKS[4], '0'), (p.TASKS[5], '29999')]:
+            with self.subTest(name=name):
+                events = self.events()
+                events[-1].payload['commands'][name]['stdout'] = stdout
+                self.assert_incomplete(events)
+
+    def test_extra_probe_json_field_is_not_silently_discarded(self):
+        events = self.events()
+        row = events[-1].payload['commands'][p.TASKS[2]]
+        value = json.loads(row['stdout'])
+        value['SECRET'] = 'not allowed'
+        row['stdout'] = json.dumps(value)
+        self.assert_incomplete(events)
+
+    def test_wrong_facts_stop_before_any_measurement_is_published(self):
+        for value in ('3.9.20', None, False):
+            with self.subTest(value=value):
+                events = self.events()
+                events[-1].payload['facts']['ansible_python_version'] = value
+                self.assert_incomplete(events)
+
+    def test_missing_metadata_or_censored_publication_stops(self):
+        events = self.events()
+        del events[0].warnings
+        self.assert_incomplete(events)
+        events = self.events()
+        events[-1].payload = {'censored': 'SECRET'}
+        self.assert_incomplete(events)
+
+    def test_no_events_cannot_pass(self):
+        self.assert_incomplete([])
+
+    def test_publication_playbook_is_explicit_and_does_not_forward_whole_results(self):
+        play, = yaml.safe_load((ROOT / 'scripts/p1/runtime_smoke.yml').read_text())
+        task = play['tasks'][-1]
+        self.assertEqual(set(task), {'name', 'ansible.builtin.debug', 'no_log'})
+        self.assertEqual(task['name'], callback.PUBLICATION)
+        self.assertIs(task['no_log'], False)
+        msg = task['ansible.builtin.debug']['msg']
+        self.assertEqual(set(msg), {'schema', 'facts', 'commands'})
+        self.assertEqual(msg['schema'], 'ruby-p1-runtime-publication-r16')
+        self.assertEqual(msg['facts'], {name: '{{ p1_facts.ansible_facts.' + name + ' }}'
+                                      for name in p.FACTS})
+        registers = ('p1_baseline', 'p1_fixture', 'p1_nonroot', 'p1_become')
+        expected = {name: {'rc': '{{ ' + reg + '.rc }}', 'stdout': '{{ ' + reg + '.stdout }}',
+                          'stderr_present': '{{ ' + reg + ".stderr != '' }}"}
+                    for name, reg in zip(p.TASKS[2:], registers)}
+        self.assertEqual(msg['commands'], expected)
+        self.assertEqual([task['register'] for task in play['tasks'][2:6]], list(registers))
 
 
 class RuntimeProtocolTests(unittest.TestCase):
@@ -615,15 +828,15 @@ class RuntimeHostTests(unittest.TestCase):
         play, = yaml.safe_load((ROOT / 'scripts/p1/runtime_smoke.yml').read_text())
         self.assertFalse(play['gather_facts'])
         self.assertNotIn('roles', play)
-        self.assertEqual(tuple(task['name'] for task in play['tasks']), p.TASKS)
+        self.assertEqual(tuple(task['name'] for task in play['tasks']), p.TASKS + (callback.PUBLICATION,))
         setup = play['tasks'][0]['ansible.builtin.setup']
         self.assertEqual(set(setup['filter']), set(p.FACTS))
         self.assertIn('!min', setup['gather_subset'])
         self.assertIn('platform', setup['gather_subset'])
-        self.assertTrue(all(task['no_log'] for task in play['tasks']))
-        self.assertFalse(play['tasks'][-2]['become'])
-        self.assertTrue(play['tasks'][-1]['become'])
-        self.assertEqual(play['tasks'][-1]['vars']['ansible_user'], t.USER)
+        self.assertTrue(all(task['no_log'] for task in play['tasks'][:6]))
+        self.assertFalse(play['tasks'][4]['become'])
+        self.assertTrue(play['tasks'][5]['become'])
+        self.assertEqual(play['tasks'][5]['vars']['ansible_user'], t.USER)
 
     def test_evaluation_workflow_requires_flag_and_branch(self):
         after = yaml.safe_load((ROOT / '.circleci/config.yml').read_text())
