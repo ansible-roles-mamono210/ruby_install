@@ -42,16 +42,17 @@ class Response(io.BytesIO):
 
 
 def archive_report(version):
-    return {'status': 'PASSED', 'policy': 'bounded_metadata_audit_r18',
+    return {'status': 'PASSED', 'policy': 'bounded_metadata_audit_r20',
             'root': 'ruby-' + version, 'headers': 4, 'members': 4,
             'types': {'file': 3, 'directory': 1, 'symlink': 0, 'hardlink': 0},
             'regular_file_bytes': 100, 'tar_stream_bytes': 10240,
             'required_regular_files': list(w.REQUIRED_FILES),
-            'gzip_eof_verified': True, 'members_extracted': False}
+            'gzip_eof_verified': True, 'members_extracted': False,
+            'end_marker': 'two_zero_blocks', 'end_offset': 3584}
 
 
 def report():
-    return {'schema': 'ruby-p1-source-container-r19', 'status': w.SUCCESS,
+    return {'schema': 'ruby-p1-source-container-r20', 'status': w.SUCCESS,
             'scope': 'two_fixed_https_urls_no_extraction', 'python': '3.9.19',
             'redirect_policy': 'reject_all_for_measurement_only',
             'redirect_fixture_tested': False, 'ansible_download_verified': False,

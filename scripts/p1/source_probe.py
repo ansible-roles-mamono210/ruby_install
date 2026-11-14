@@ -49,7 +49,7 @@ def validate(value, worker):
                      'redirect_fixture_tested', 'ansible_download_verified',
                      'archive_safety_verified', 'build_verified'}
     if (type(value) is not dict or set(value) != expected_keys
-            or value['schema'] != 'ruby-p1-source-container-r19'
+            or value['schema'] != 'ruby-p1-source-container-r20'
             or value['status'] != worker.SUCCESS
             or value['scope'] != 'two_fixed_https_urls_no_extraction'
             or value['redirect_policy'] != 'reject_all_for_measurement_only'
@@ -79,15 +79,22 @@ def validate(value, worker):
 
 def validate_archive(value, version, worker):
     keys = {'status', 'policy', 'root', 'headers', 'members', 'types', 'regular_file_bytes',
-            'tar_stream_bytes', 'required_regular_files', 'gzip_eof_verified', 'members_extracted'}
+            'tar_stream_bytes', 'required_regular_files', 'gzip_eof_verified', 'members_extracted',
+            'end_marker', 'end_offset'}
     if (type(value) is not dict or set(value) != keys or value['status'] != 'PASSED'
-            or value['policy'] != 'bounded_metadata_audit_r18' or value['root'] != 'ruby-' + version
+            or value['policy'] != 'bounded_metadata_audit_r20' or value['root'] != 'ruby-' + version
             or value['required_regular_files'] != list(worker.REQUIRED_FILES)
             or value['gzip_eof_verified'] is not True or value['members_extracted'] is not False):
         raise Stop('ARCHIVE_RESULT_MISMATCH')
     limits = {'headers': worker.MAX_HEADERS, 'members': worker.MAX_HEADERS,
               'regular_file_bytes': worker.MAX_TAR_BYTES, 'tar_stream_bytes': worker.MAX_TAR_BYTES}
     if any(type(value[k]) is not int or not 0 < value[k] <= limit for k, limit in limits.items()):
+        raise Stop('ARCHIVE_RESULT_MISMATCH')
+    marker, offset = value['end_marker'], value['end_offset']
+    if (type(marker) is not str or marker not in ('two_zero_blocks', 'omitted_at_member_boundary')
+            or type(offset) is not int or not 0 < offset <= value['tar_stream_bytes'] or offset % 512
+            or (marker == 'omitted_at_member_boundary' and offset != value['tar_stream_bytes'])
+            or (marker == 'two_zero_blocks' and offset + 1024 > value['tar_stream_bytes'])):
         raise Stop('ARCHIVE_RESULT_MISMATCH')
     kinds = value['types']
     if (type(kinds) is not dict or set(kinds) != {'file', 'directory', 'symlink', 'hardlink'}
@@ -163,6 +170,15 @@ def failure_summary(value, worker):
                     and row.get('sha256') == checksum and type(row.get('bytes')) is int
                     and 0 < row['bytes'] <= worker.MAX_BYTES):
                 item.update(checksum_match=True, sha256=checksum, bytes=row['bytes'])
+                if 'archive' in row:
+                    # Preserve a completed first source if the second fails.
+                    # Apply the same allowlist/schema as the success path.
+                    try:
+                        validate_archive(row['archive'], row['version'], worker)
+                    except Stop:
+                        item['archive_result_rejected'] = True
+                    else:
+                        item['archive'] = dict(row['archive'])
             if result['reason'] == 'ARCHIVE_TRUNCATED' and 'archive_failure' in row:
                 diagnostic = truncation_diagnostic(row['archive_failure'], worker)
                 if diagnostic is None:
@@ -189,12 +205,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-source-run-r19', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-source-run-r20', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-source-r19'
+    name = 'ruby-p1-' + run_id + '-source-r20'
     handlers = {}
     try:
         def interrupted(_signum, _frame):

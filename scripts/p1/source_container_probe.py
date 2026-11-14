@@ -169,24 +169,39 @@ def check_archive_graph(nodes, root):
             raise Stop('ARCHIVE_REQUIRED_FILE')
 
 
-def audit_archive(path, version, deadline):
+def audit_archive(path, version, deadline, *, allow_boundary_eof=False):
     """Decompress into bounded memory chunks; never extract a member to disk.
 
     This deliberately limited measurement reader supports ordinary ustar/GNU
     headers and bounded known PAX metadata. Unsupported metadata fails closed.
     It is not a production extractor or a guarantee about later extraction.
+    Only the fixed-source download path enables an omitted end marker, after
+    verifying the compressed bytes against the pinned SHA-256. The default
+    remains strict; this option never accepts partial headers, data or padding.
     """
     root, nodes = 'ruby-' + version, {}
     counts = {kind: 0 for kind in ('file', 'directory', 'symlink', 'hardlink')}
     headers, file_bytes, pending, global_pax, chain = 0, 0, {}, {}, 0
+    end_marker, end_offset = 'two_zero_blocks', 0
     try:
         with gzip.open(path, 'rb') as stream:
             reader = ArchiveReader(stream, deadline)
             while True:
                 reader.context.update(headers_seen=headers, header_offset=reader.count,
                                       member_kind='none', declared_size=0, payload_remaining=0)
-                block = reader.exact(512)
+                try:
+                    block = reader.exact(512)
+                except ArchiveTruncated as error:
+                    # GzipFile.read returned clean EOF, including trailer/CRC
+                    # validation. No incomplete extension or member may remain.
+                    if (allow_boundary_eof is True and headers > 0 and not pending
+                            and not chain and reader.count % 512 == 0
+                            and error.diagnostic['received_bytes'] == 0):
+                        end_marker, end_offset = 'omitted_at_member_boundary', reader.count
+                        break
+                    raise
                 if block == bytes(512):
+                    end_offset = reader.count - 512
                     if pending or chain or reader.exact(512, 'second_end_block') != bytes(512):
                         raise Stop('ARCHIVE_END_INVALID')
                     # Read through gzip EOF/CRC and reject hidden concatenated tar data.
@@ -261,11 +276,12 @@ def audit_archive(path, version, deadline):
                 if any(reader.exact((-size) % 512, 'file_padding')):
                     raise Stop('ARCHIVE_PADDING_INVALID')
             check_archive_graph(nodes, root)
-            return {'status': 'PASSED', 'policy': 'bounded_metadata_audit_r18', 'root': root,
+            return {'status': 'PASSED', 'policy': 'bounded_metadata_audit_r20', 'root': root,
                     'headers': headers, 'members': len(nodes), 'types': counts,
                     'regular_file_bytes': file_bytes, 'tar_stream_bytes': reader.count,
                     'required_regular_files': list(REQUIRED_FILES),
-                    'gzip_eof_verified': True, 'members_extracted': False}
+                    'gzip_eof_verified': True, 'members_extracted': False,
+                    'end_marker': end_marker, 'end_offset': end_offset}
     except Stop:
         raise
     except (OSError, EOFError, zlib.error, tarfile.TarError, UnicodeError, ValueError):
@@ -328,7 +344,7 @@ def download(source, row):
     start = time.monotonic()
     try:
         connection.request('GET', path, headers={
-            'Accept-Encoding': 'identity', 'User-Agent': 'ruby-p1-source-measurement-r19'})
+            'Accept-Encoding': 'identity', 'User-Agent': 'ruby-p1-source-measurement-r20'})
         response = connection.getresponse()
         row['http_status'] = response.status
         # http.client does not follow redirects. Never request the Location URL.
@@ -342,7 +358,8 @@ def download(source, row):
             archive = Path(directory) / 'source.tar.gz'
             row.update(receive(response, archive, expected, start + 120))
             try:
-                row['archive'] = audit_archive(archive, version, min(start + 150, time.monotonic() + 60))
+                row['archive'] = audit_archive(archive, version, min(start + 150, time.monotonic() + 60),
+                                               allow_boundary_eof=True)
             except ArchiveTruncated as error:
                 row['archive_failure'] = error.diagnostic
                 raise
@@ -353,7 +370,7 @@ def download(source, row):
 
 
 def main():
-    report = {'schema': 'ruby-p1-source-container-r19', 'status': 'INCOMPLETE',
+    report = {'schema': 'ruby-p1-source-container-r20', 'status': 'INCOMPLETE',
               'scope': 'two_fixed_https_urls_no_extraction', 'results': [],
               'redirect_policy': 'reject_all_for_measurement_only',
               'redirect_fixture_tested': False, 'ansible_download_verified': False,

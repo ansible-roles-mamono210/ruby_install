@@ -38,7 +38,8 @@ def tar_bytes(entries, format=tarfile.USTAR_FORMAT):
 
 
 class ArchiveTests(unittest.TestCase):
-    def audit(self, entries=None, raw=None, compressed=None, format=tarfile.USTAR_FORMAT):
+    def audit(self, entries=None, raw=None, compressed=None, format=tarfile.USTAR_FORMAT,
+              allow_boundary_eof=False):
         if compressed is None:
             compressed = gzip.compress(tar_bytes(valid_entries() if entries is None else entries, format)
                                        if raw is None else raw)
@@ -47,7 +48,8 @@ class ArchiveTests(unittest.TestCase):
             source.write_bytes(compressed)
             with patch.object(tarfile.TarFile, 'extract', side_effect=AssertionError('extract')), \
                     patch.object(tarfile.TarFile, 'extractall', side_effect=AssertionError('extractall')):
-                result = w.audit_archive(source, '3.4.12', time.monotonic() + 30)
+                result = w.audit_archive(source, '3.4.12', time.monotonic() + 30,
+                                         allow_boundary_eof=allow_boundary_eof)
             self.assertEqual(list(Path(directory).iterdir()), [source])
             return result
 
@@ -412,9 +414,9 @@ class TruncationDiagnosticTests(unittest.TestCase):
         paths = []
         original = w.audit_archive
 
-        def capture(path, version, deadline):
+        def capture(path, version, deadline, **kwargs):
             paths.append(path)
-            return original(path, version, deadline)
+            return original(path, version, deadline, **kwargs)
 
         with patch.object(w, 'SOURCES', (source,)), \
                 patch.object(w.http.client, 'HTTPSConnection', return_value=conn), \
@@ -429,6 +431,201 @@ class TruncationDiagnosticTests(unittest.TestCase):
         self.assertEqual(result['observations'][0]['archive_failure']['stream_offset'], 512)
         self.assertEqual(result['observations'][0]['sha256'], digest)
         self.assertEqual(result['observations'][0]['bytes'], len(compressed))
+
+
+class BoundaryEofTests(unittest.TestCase):
+    audit = ArchiveTests.audit
+
+    @staticmethod
+    def body(entries=None):
+        # The same write shape as Ruby v3_4_12 tar_create: header, contents,
+        # per-member padding; no TarWriter.close/end-marker write. Synthetic
+        # fixture only, not execution of Ruby or a reproduction of its release.
+        return b''.join(item.tobuf(format=tarfile.USTAR_FORMAT) + data + bytes((-len(data)) % 512)
+                        for item, data in (valid_entries() if entries is None else entries))
+
+    def test_complete_boundary_is_opt_in_and_matches_standard_reader(self):
+        raw = self.body()
+        with self.assertRaises(w.ArchiveTruncated):
+            self.audit(raw=raw)
+        value = self.audit(raw=raw, allow_boundary_eof=True)
+        with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as standard:
+            members = standard.getmembers()
+        self.assertEqual([m.name for m in members], [m.name for m, _ in valid_entries()])
+        self.assertEqual(value['members'], len(members))
+        self.assertEqual(value['regular_file_bytes'], sum(m.size for m in members))
+        self.assertEqual((value['end_marker'], value['end_offset'], value['tar_stream_bytes']),
+                         ('omitted_at_member_boundary', 3584, 3584))
+        h.validate_archive(value, '3.4.12', w)
+
+    def test_normal_marker_and_zero_record_padding_stay_valid(self):
+        raw = self.body()
+        for padding in (1024, 1536, 10240):
+            with self.subTest(padding=padding):
+                value = self.audit(raw=raw + bytes(padding), allow_boundary_eof=True)
+                self.assertEqual((value['end_marker'], value['end_offset']), ('two_zero_blocks', len(raw)))
+                h.validate_archive(value, '3.4.12', w)
+
+    def test_implicit_root_directory_is_valid_at_complete_boundary(self):
+        value = self.audit(raw=self.body(valid_entries()[1:]), allow_boundary_eof=True)
+        self.assertEqual((value['members'], value['types']['directory']), (3, 0))
+        h.validate_archive(value, '3.4.12', w)
+
+    def test_complete_gnu_and_pax_extensions_match_standard_member_boundary(self):
+        for format in (tarfile.GNU_FORMAT, tarfile.PAX_FORMAT):
+            raw = tar_bytes(valid_entries() + [entry(ROOT + '/' + 'a' * 130)], format=format)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as standard:
+                members = standard.getmembers()
+                end = standard.offset
+            value = self.audit(raw=raw[:end], allow_boundary_eof=True)
+            self.assertEqual((value['members'], value['end_offset']), (len(members), end))
+            self.assertEqual(value['headers'], len(members) + 1)
+            h.validate_archive(value, '3.4.12', w)
+
+    def test_single_zero_block_or_partial_second_marker_still_fails(self):
+        for padding in (512, 513, 1023):
+            with self.subTest(padding=padding), self.assertRaises(w.ArchiveTruncated) as captured:
+                self.audit(raw=self.body() + bytes(padding), allow_boundary_eof=True)
+            self.assertEqual(captured.exception.diagnostic['stage'], 'second_end_block')
+
+    def test_partial_header_payload_and_padding_still_fail(self):
+        raw = self.body()
+        for size, stage in ((513, 'header'), (1024, 'file_payload'), (1025, 'file_padding'),
+                            (1125, 'file_padding'), (len(raw) - 1, 'file_padding')):
+            with self.subTest(size=size), self.assertRaises(w.ArchiveTruncated) as captured:
+                self.audit(raw=raw[:size], allow_boundary_eof=True)
+            self.assertEqual(captured.exception.diagnostic['stage'], stage)
+        for suffix in (b'x', bytes(1), bytes(511)):
+            with self.assertRaises(w.ArchiveTruncated) as captured:
+                self.audit(raw=raw + suffix, allow_boundary_eof=True)
+            self.assertEqual(captured.exception.diagnostic['stage'], 'header')
+
+    def test_gzip_crc_length_footer_and_trailing_garbage_still_fail(self):
+        compressed = gzip.compress(self.body())
+        crc = bytearray(compressed); crc[-8] ^= 1
+        length = bytearray(compressed); length[-4] ^= 1
+        for bad in (bytes(crc), bytes(length), compressed[:-1], compressed[:-8], compressed + b'bad'):
+            with self.subTest(size=len(bad)), self.assertRaisesRegex(w.Stop, 'ARCHIVE_FORMAT_INVALID'):
+                self.audit(compressed=bad, allow_boundary_eof=True)
+
+    def test_empty_stream_and_unconsumed_extensions_still_fail(self):
+        with self.assertRaises(w.ArchiveTruncated):
+            self.audit(raw=b'', allow_boundary_eof=True)
+        for kind, payload in ((tarfile.GNUTYPE_LONGNAME, b'path\0'),
+                              (tarfile.GNUTYPE_LONGLINK, b'path\0'),
+                              (tarfile.XHDTYPE, b'11 mtime=1\n'), (tarfile.XGLTYPE, b'11 mtime=1\n')):
+            item = tarfile.TarInfo('././@Extension'); item.type, item.size = kind, len(payload)
+            extra = item.tobuf(format=tarfile.GNU_FORMAT) + payload + bytes((-len(payload)) % 512)
+            with self.subTest(kind=kind), self.assertRaises(w.ArchiveTruncated):
+                self.audit(raw=self.body() + extra, allow_boundary_eof=True)
+
+    def test_complete_member_cut_cannot_bypass_required_files(self):
+        with self.assertRaisesRegex(w.Stop, 'ARCHIVE_REQUIRED_FILE'):
+            self.audit(raw=self.body(valid_entries()[:-1]), allow_boundary_eof=True)
+
+    def test_graph_checks_run_after_omitted_marker(self):
+        extras = [([entry(ROOT + '/a', kind=tarfile.SYMTYPE, target='../outside')], 'LINK_ESCAPE'),
+                  ([entry(ROOT + '/a', kind=tarfile.SYMTYPE, target='missing')], 'LINK_TARGET'),
+                  ([entry(ROOT + '/a', kind=tarfile.LNKTYPE, target=ROOT + '/missing')], 'HARDLINK_TARGET'),
+                  ([entry(ROOT + '/a'), entry(ROOT + '/a/b')], 'PARENT_CONFLICT'),
+                  ([entry(ROOT + '/a', kind=tarfile.SYMTYPE, target='a')], 'LINK_CYCLE_OR_DEPTH')]
+        for extra, reason in extras:
+            with self.subTest(reason=reason), self.assertRaisesRegex(w.Stop, reason):
+                self.audit(raw=self.body(valid_entries() + extra), allow_boundary_eof=True)
+
+    def test_paths_duplicates_and_nonzero_padding_still_fail(self):
+        for extra, reason in ((entry('/outside'), 'PATH_INVALID'),
+                              (entry(ROOT + '/configure'), 'DUPLICATE')):
+            with self.assertRaisesRegex(w.Stop, reason):
+                self.audit(raw=self.body(valid_entries() + [extra]), allow_boundary_eof=True)
+        raw = bytearray(self.body()); raw[1025] = 1
+        with self.assertRaisesRegex(w.Stop, 'PADDING_INVALID'):
+            self.audit(raw=raw, allow_boundary_eof=True)
+
+    def test_hidden_data_after_marker_and_concatenated_archive_still_fail(self):
+        raw = self.body()
+        for compressed in (gzip.compress(raw + bytes(1024) + b'evil'),
+                           gzip.compress(raw + bytes(1024)) + gzip.compress(raw)):
+            with self.assertRaisesRegex(w.Stop, 'ARCHIVE_TRAILING_DATA'):
+                self.audit(compressed=compressed, allow_boundary_eof=True)
+
+    def test_expansion_header_size_and_time_bounds_still_apply(self):
+        for key, limit, reason in (('MAX_TAR_BYTES', 1024, 'EXPANSION_LIMIT'),
+                                  ('MAX_HEADERS', 2, 'HEADER_LIMIT'), ('MAX_FILE_BYTES', 0, 'SIZE_INVALID')):
+            with patch.object(w, key, limit), self.assertRaisesRegex(w.Stop, reason):
+                self.audit(raw=self.body(), allow_boundary_eof=True)
+        with patch.object(w.time, 'monotonic', side_effect=[0, 31]), self.assertRaisesRegex(w.Stop, 'TIME_LIMIT'):
+            self.audit(raw=self.body(), allow_boundary_eof=True)
+
+    def test_eof_permission_requires_exact_boolean_true(self):
+        for option in (False, None, 1, 'true'):
+            with self.subTest(option=option), self.assertRaises(w.ArchiveTruncated):
+                self.audit(raw=self.body(), allow_boundary_eof=option)
+
+    def test_host_rejects_missing_unknown_and_inconsistent_marker_evidence(self):
+        good = self.audit(raw=self.body(), allow_boundary_eof=True)
+        for field, value in (('end_marker', 'SECRET'), ('end_marker', []), ('end_offset', True),
+                             ('end_offset', 0), ('end_offset', 513), ('end_offset', 4096),
+                             ('end_offset', 3072), ('end_marker', 'two_zero_blocks'),
+                             ('policy', 'bounded_metadata_audit_r18')):
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(h.Stop, 'ARCHIVE_RESULT'):
+                h.validate_archive(dict(good, **{field: value}), '3.4.12', w)
+        for field in ('end_marker', 'end_offset'):
+            bad = dict(good); del bad[field]
+            with self.assertRaisesRegex(h.Stop, 'ARCHIVE_RESULT'):
+                h.validate_archive(bad, '3.4.12', w)
+
+    def test_download_checks_digest_before_enabling_eof_and_cleans_file(self):
+        compressed = gzip.compress(self.body()); digest = w.hashlib.sha256(compressed).hexdigest()
+        source = ('3.4.12', w.SOURCES[0][1], digest)
+        conn = Mock(); conn.getresponse.return_value = Response(compressed)
+        paths, options = [], []
+        original = w.audit_archive
+
+        def capture(path, version, deadline, **kwargs):
+            paths.append(path); options.append(kwargs)
+            self.assertEqual(w.hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+            return original(path, version, deadline, **kwargs)
+
+        row = {}
+        with patch.object(w, 'SOURCES', (source,)), \
+                patch.object(w.http.client, 'HTTPSConnection', return_value=conn), \
+                patch.object(w, 'audit_archive', side_effect=capture):
+            w.download(source, row)
+        self.assertEqual(options, [{'allow_boundary_eof': True}])
+        self.assertEqual(row['archive']['end_marker'], 'omitted_at_member_boundary')
+        self.assertEqual(row['sha256'], digest)
+        self.assertTrue(row['temporary_file_removed'])
+        self.assertTrue(paths and all(not p.exists() for p in paths))
+        self.assertEqual(conn.request.call_count, 1)
+        conn.close.assert_called_once()
+
+    def test_real_checksum_mismatch_prevents_compatibility_path(self):
+        conn = Mock(); conn.getresponse.return_value = Response(gzip.compress(self.body()))
+        with patch.object(w.http.client, 'HTTPSConnection', return_value=conn), \
+                patch.object(w, 'audit_archive') as audit, self.assertRaisesRegex(w.Stop, 'SHA256_MISMATCH'):
+            w.download(w.SOURCES[0], {})
+        audit.assert_not_called()
+
+    def test_failure_summary_preserves_valid_first_archive_when_second_fails(self):
+        first = report()['results'][0]
+        first['archive'] = self.audit(raw=self.body(), allow_boundary_eof=True)
+        result = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED', 'results': [
+            first, {'version': '4.0.9', 'http_status': 200, 'redirect': 'none'}]}, w)
+        self.assertEqual(result['observations'][0]['archive'], first['archive'])
+        self.assertNotIn('archive', result['observations'][1])
+        self.assertEqual(result['reason'], 'ARCHIVE_TRUNCATED')
+
+    def test_failure_summary_drops_unverified_or_invalid_archive_evidence(self):
+        for field, value in (('end_marker', 'SECRET'), ('secret_field', 'SECRET'), ('end_offset', 999)):
+            first = report()['results'][0]; first['archive'][field] = value
+            result = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED', 'results': [first]}, w)
+            self.assertEqual(result['observations'][0]['archive_result_rejected'], True)
+            self.assertNotIn('SECRET', str(result))
+            self.assertNotIn('archive', result['observations'][0])
+        first = report()['results'][0]; first['checksum_match'] = False
+        result = h.failure_summary({'reason': 'ARCHIVE_TRUNCATED', 'results': [first]}, w)
+        self.assertNotIn('archive', result['observations'][0])
 
 
 if __name__ == '__main__':
