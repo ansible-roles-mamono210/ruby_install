@@ -6,12 +6,52 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import time
 
+
+def collection_warning_identity(stderr):
+    """Match complete known records; keep every unmatched byte unclassified.
+
+    The template is from ansible-core v2.21.6 dependency_resolution/dataclasses.py.
+    Recognition is diagnostic only, never a warning exemption. Paths and message
+    text are used privately and are not returned, including for unknown records.
+    """
+    result = {'schema': 'ruby-p1-collection-warning-r7', 'state': 'EMPTY',
+              'matched_records': 0, 'matched_bytes': 0,
+              'unclassified_bytes': len(stderr), 'message_counts': {},
+              'expected_internal_protomatter_records': 0}
+    if not stderr:
+        return result
+    if len(stderr) > 64 * 1024:
+        result['state'] = 'SIZE_LIMIT'
+        return result
+    pattern = re.compile(
+        rb"\[WARNING\]: Collection at '(?P<path>[^'\r\n]+)' does not have a "
+        rb'MANIFEST\.json file, nor has it galaxy\.yml: cannot detect version\.\n')
+    expected_path = (
+        b'/home/circleci/.local/lib/python3.14/site-packages/ansible/'
+        b'_internal/ansible_collections/ansible/_protomatter')
+    # LF is part of the verified record format. Do not normalize, strip ANSI,
+    # discard blank lines, or accept an incomplete final record as a full match.
+    for line in stderr.splitlines(keepends=True):
+        match = pattern.fullmatch(line)
+        if match is None:
+            continue
+        result['matched_records'] += 1
+        result['matched_bytes'] += len(line)
+        result['expected_internal_protomatter_records'] += match['path'] == expected_path
+    if result['matched_records']:
+        result['message_counts']['COLLECTION_METADATA_MISSING'] = result['matched_records']
+    result['unclassified_bytes'] -= result['matched_bytes']
+    result['state'] = ('FULLY_CLASSIFIED' if result['unclassified_bytes'] == 0
+                       else 'PARTIALLY_CLASSIFIED' if result['matched_records']
+                       else 'UNCLASSIFIED')
+    return result
 
 
 def warning_facts(stderr):
@@ -41,6 +81,7 @@ def warning_facts(stderr):
                                if any(needle in lower for needle in needles)),
         'stderr_path_classes': sorted(code for code, value in paths.items() if value in stderr),
         'stderr_review_required': bool(stderr),
+        'stderr_identity': collection_warning_identity(stderr),
     }
 
 def collection_settings():
