@@ -51,16 +51,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Check controller dependencies and Docker driver at a fixed digest
+          name: Check target imports and configuration at a fixed digest
           no_output_timeout: 5m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
-            timeout --signal=TERM --kill-after=30s 22m \
-              bash scripts/p1/check-environment.sh \
-              --mode controller-checks --allow-pull --ephemeral-ci \
+            timeout --signal=TERM --kill-after=30s 12m \
+              python3 scripts/p1/target_probe.py \
+              --allow-pull --ephemeral-ci \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
