@@ -41,8 +41,17 @@ class Response(io.BytesIO):
         return self.headers.get(key, default)
 
 
+def archive_report(version):
+    return {'status': 'PASSED', 'policy': 'bounded_metadata_audit_r18',
+            'root': 'ruby-' + version, 'headers': 4, 'members': 4,
+            'types': {'file': 3, 'directory': 1, 'symlink': 0, 'hardlink': 0},
+            'regular_file_bytes': 100, 'tar_stream_bytes': 10240,
+            'required_regular_files': list(w.REQUIRED_FILES),
+            'gzip_eof_verified': True, 'members_extracted': False}
+
+
 def report():
-    return {'schema': 'ruby-p1-source-container-r17', 'status': w.SUCCESS,
+    return {'schema': 'ruby-p1-source-container-r18', 'status': w.SUCCESS,
             'scope': 'two_fixed_https_urls_no_extraction', 'python': '3.9.19',
             'redirect_policy': 'reject_all_for_measurement_only',
             'redirect_fixture_tested': False, 'ansible_download_verified': False,
@@ -50,7 +59,7 @@ def report():
             'results': [{'version': v, 'url': 'https://' + w.HOST + p, 'expected_sha256': d,
                          'http_status': 200, 'redirect': 'none', 'bytes': 100,
                          'sha256': d, 'checksum_match': True, 'elapsed_seconds': 0.5,
-                         'temporary_file_removed': True} for v, p, d in w.SOURCES]}
+                         'temporary_file_removed': True, 'archive': archive_report(v)} for v, p, d in w.SOURCES]}
 
 
 class BodyTests(unittest.TestCase):
@@ -151,7 +160,8 @@ class DownloadTests(unittest.TestCase):
             return {'sha256': checksum, 'bytes': 8, 'checksum_match': True}
 
         with patch.object(w.http.client, 'HTTPSConnection', return_value=conn) as create, \
-                patch.object(w, 'receive', side_effect=receive):
+                patch.object(w, 'receive', side_effect=receive), \
+                patch.object(w, 'audit_archive', return_value=archive_report('3.4.12')):
             row = {}
             w.download(w.SOURCES[0], row)
         ctx = create.call_args.kwargs['context']
@@ -274,7 +284,7 @@ class HostTests(unittest.TestCase):
                              side_effect=subprocess.TimeoutExpired('mock', 1) if timeout else None), \
                 contextlib.redirect_stdout(io.StringIO()):
             path = Path(directory) / 'report.json'
-            result = h.main(['--output', str(path), '--allow-pull', '--ephemeral-ci', '--allow-source-download'])
+            result = h.main(['--output', str(path), '--allow-pull', '--ephemeral-ci', '--allow-source-download', '--allow-archive-audit'])
             saved = json.loads(path.read_text())
         return result, saved, runtime_mock
 
@@ -323,6 +333,7 @@ class HostTests(unittest.TestCase):
         command = job['steps'][1]['run']['command']
         self.assertIn('scripts/p1/source_probe.py', command)
         self.assertIn('--allow-source-download', command)
+        self.assertIn('--allow-archive-audit', command)
         self.assertNotIn('runtime_smoke.py', command)
         # The runner must not kill the quiet collector before its own timeout
         # and 30-second termination grace can record an outcome.

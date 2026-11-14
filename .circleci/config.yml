@@ -51,7 +51,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Measure fixed Ruby source URLs and SHA-256
+          name: Audit verified Ruby source archives without extraction
           no_output_timeout: 13m
           command: |
             set -euo pipefail
@@ -60,7 +60,7 @@ jobs:
             set +e
             timeout --signal=TERM --kill-after=30s 12m \
               python3 scripts/p1/source_probe.py \
-              --allow-pull --ephemeral-ci --allow-source-download \
+              --allow-pull --ephemeral-ci --allow-source-download --allow-archive-audit \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e

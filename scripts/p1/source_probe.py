@@ -49,7 +49,7 @@ def validate(value, worker):
                      'redirect_fixture_tested', 'ansible_download_verified',
                      'archive_safety_verified', 'build_verified'}
     if (type(value) is not dict or set(value) != expected_keys
-            or value['schema'] != 'ruby-p1-source-container-r17'
+            or value['schema'] != 'ruby-p1-source-container-r18'
             or value['status'] != worker.SUCCESS
             or value['scope'] != 'two_fixed_https_urls_no_extraction'
             or value['redirect_policy'] != 'reject_all_for_measurement_only'
@@ -61,7 +61,7 @@ def validate(value, worker):
     if type(value['results']) is not list or len(value['results']) != 2:
         raise Stop('SOURCE_COUNT')
     fields = {'version', 'url', 'expected_sha256', 'http_status', 'redirect', 'bytes',
-              'sha256', 'checksum_match', 'elapsed_seconds', 'temporary_file_removed'}
+              'sha256', 'checksum_match', 'elapsed_seconds', 'temporary_file_removed', 'archive'}
     for row, source in zip(value['results'], worker.SOURCES):
         version, path, checksum = source
         if (type(row) is not dict or set(row) != fields or row['version'] != version
@@ -74,6 +74,28 @@ def validate(value, worker):
                 or type(row['elapsed_seconds']) not in (float, int)
                 or not math.isfinite(row['elapsed_seconds']) or not 0 <= row['elapsed_seconds'] <= 330):
             raise Stop('SOURCE_RESULT_MISMATCH')
+        validate_archive(row['archive'], version, worker)
+
+
+def validate_archive(value, version, worker):
+    keys = {'status', 'policy', 'root', 'headers', 'members', 'types', 'regular_file_bytes',
+            'tar_stream_bytes', 'required_regular_files', 'gzip_eof_verified', 'members_extracted'}
+    if (type(value) is not dict or set(value) != keys or value['status'] != 'PASSED'
+            or value['policy'] != 'bounded_metadata_audit_r18' or value['root'] != 'ruby-' + version
+            or value['required_regular_files'] != list(worker.REQUIRED_FILES)
+            or value['gzip_eof_verified'] is not True or value['members_extracted'] is not False):
+        raise Stop('ARCHIVE_RESULT_MISMATCH')
+    limits = {'headers': worker.MAX_HEADERS, 'members': worker.MAX_HEADERS,
+              'regular_file_bytes': worker.MAX_TAR_BYTES, 'tar_stream_bytes': worker.MAX_TAR_BYTES}
+    if any(type(value[k]) is not int or not 0 < value[k] <= limit for k, limit in limits.items()):
+        raise Stop('ARCHIVE_RESULT_MISMATCH')
+    kinds = value['types']
+    if (type(kinds) is not dict or set(kinds) != {'file', 'directory', 'symlink', 'hardlink'}
+            or any(type(v) is not int or not 0 <= v <= worker.MAX_HEADERS for v in kinds.values())
+            or sum(kinds.values()) != value['members'] or kinds['file'] < len(worker.REQUIRED_FILES)
+            or value['headers'] < value['members'] or value['tar_stream_bytes'] % 512
+            or value['regular_file_bytes'] >= value['tar_stream_bytes']):
+        raise Stop('ARCHIVE_RESULT_MISMATCH')
 
 
 def failure_summary(value):
@@ -83,7 +105,15 @@ def failure_summary(value):
                'HTTP_STATUS_UNEXPECTED', 'CONTENT_ENCODING_UNEXPECTED',
                'CONTENT_LENGTH_INVALID', 'DOWNLOAD_TIME_LIMIT', 'DOWNLOAD_TOO_LARGE',
                'BODY_LENGTH_MISMATCH', 'SHA256_MISMATCH',
-               'TLS_CERTIFICATE_VERIFICATION_FAILED', 'NETWORK_OR_IO_ERROR', 'UNEXPECTED_ERROR'}
+               'TLS_CERTIFICATE_VERIFICATION_FAILED', 'NETWORK_OR_IO_ERROR', 'UNEXPECTED_ERROR',
+               'ARCHIVE_PATH_INVALID', 'ARCHIVE_METADATA_INVALID', 'ARCHIVE_METADATA_UNSUPPORTED',
+               'ARCHIVE_READ_BOUND', 'ARCHIVE_TIME_LIMIT', 'ARCHIVE_EXPANSION_LIMIT',
+               'ARCHIVE_TRUNCATED', 'ARCHIVE_PARENT_CONFLICT', 'ARCHIVE_HARDLINK_TARGET',
+               'ARCHIVE_LINK_ESCAPE', 'ARCHIVE_LINK_CYCLE_OR_DEPTH', 'ARCHIVE_LINK_TARGET',
+               'ARCHIVE_REQUIRED_FILE', 'ARCHIVE_END_INVALID', 'ARCHIVE_TRAILING_DATA',
+               'ARCHIVE_HEADER_LIMIT', 'ARCHIVE_METADATA_LIMIT', 'ARCHIVE_PADDING_INVALID',
+               'ARCHIVE_METADATA_AMBIGUOUS', 'ARCHIVE_SIZE_INVALID', 'ARCHIVE_TYPE_OR_MODE',
+               'ARCHIVE_ROOT_INVALID', 'ARCHIVE_DUPLICATE', 'ARCHIVE_FORMAT_INVALID'}
     result = {'reason': value.get('reason') if value.get('reason') in reasons else 'UNCLASSIFIED'}
     rows = value.get('results', [])
     if type(rows) is list and len(rows) <= 2:
@@ -105,10 +135,10 @@ def failure_summary(value):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
-    for name in ('allow-pull', 'allow-source-download', 'ephemeral-ci'):
+    for name in ('allow-pull', 'allow-source-download', 'allow-archive-audit', 'ephemeral-ci'):
         parser.add_argument('--' + name, action='store_true')
     args = parser.parse_args(argv)
-    if (not all((args.allow_pull, args.allow_source_download, args.ephemeral_ci))
+    if (not all((args.allow_pull, args.allow_source_download, args.allow_archive_audit, args.ephemeral_ci))
             or os.environ.get('CIRCLECI') != 'true' or os.environ.get('CIRCLE_BRANCH') != BRANCH
             or platform.system() != 'Linux' or platform.machine() != 'x86_64'):
         print('STOP: EXPLICIT_EPHEMERAL_CI_REQUIRED')
@@ -118,12 +148,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-source-run-r17', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-source-run-r18', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-source-r17'
+    name = 'ruby-p1-' + run_id + '-source-r18'
     handlers = {}
     try:
         def interrupted(_signum, _frame):
@@ -146,7 +176,7 @@ def main(argv=None):
                 or identity['config_digest'] != runtime.TARGET_CONFIG):
             raise Stop('REGISTRY_MISMATCH')
         report['image'] = identity
-        report['stage'] = 'download_fixed_sources'
+        report['stage'] = 'download_and_audit_fixed_sources'
         possible = True
         remaining = min(330, end - time.monotonic())
         if remaining <= 0:
@@ -186,7 +216,7 @@ def main(argv=None):
             json.dump(report, output, sort_keys=True, indent=2)
             output.write('\n')
     print(report['status'])
-    return 0 if report['status'] == 'SOURCE_DOWNLOADS_AND_SHA256_PASSED' else 3
+    return 0 if report['status'] == 'SOURCE_ARCHIVE_AUDIT_PASSED' else 3
 
 
 if __name__ == '__main__':
