@@ -105,6 +105,28 @@ def controller_args(name, target, run_id, directory, socket_gid):
                      '-B', '/p1/runtime_controller.py', target]
 
 
+def stage_payload(directory):
+    """Set explicit modes only on this run's fresh, disposable source copy."""
+    directory = Path(directory)
+    directory.chmod(0o755)
+    callbacks = directory / 'callback_plugins'
+    callbacks.mkdir(mode=0o755)
+    before = stat.S_IMODE(callbacks.stat().st_mode)
+    # mkdir's mode is filtered by umask; the controller may have a different UID.
+    callbacks.chmod(0o755)
+    for name in FILES:
+        destination = (callbacks if name == 'runtime_callback.py' else directory) / name
+        shutil.copyfile(ROOT / name, destination)
+        destination.chmod(0o444)
+        info = destination.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o444:
+            raise Stop('PAYLOAD_PERMISSION_MISMATCH')
+    if any(stat.S_IMODE(path.stat().st_mode) != 0o755 for path in (directory, callbacks)):
+        raise Stop('PAYLOAD_PERMISSION_MISMATCH')
+    return {'callback_mode_before': before, 'callback_mode_after': 0o755,
+            'source_modes_verified': True, 'host_uid_matches_controller': os.getuid() == 1000}
+
+
 def cleanup(name, run_id):
     query = DOCKER + ['ps', '-aq', '--filter', 'name=^/' + name + '$',
                       '--filter', 'label=ruby-p1.run=' + run_id]
@@ -185,12 +207,8 @@ def main(argv=None):
         command(target_args(target, run_id), end)
         with tempfile.TemporaryDirectory(prefix='ruby-p1-r11-') as directory:
             directory = Path(directory)
-            directory.chmod(0o755)
-            (directory / 'callback_plugins').mkdir(mode=0o755)
-            for name in FILES:
-                destination = directory / ('callback_plugins' if name == 'runtime_callback.py' else '') / name
-                shutil.copyfile(ROOT / name, destination)
-                destination.chmod(0o444)
+            report['stage'] = 'payload_prepare'
+            report['payload_permissions'] = stage_payload(directory)
             report['stage'] = 'controller_runtime'
             possible.append(controller)
             controller_rc, output = command(controller_args(controller, target, run_id, directory, sock.st_gid), end, 240, allow_nonzero=True)
@@ -201,7 +219,8 @@ def main(argv=None):
                 if value.get('stage') in ('preflight', 'ansible_playbook'):
                     attempt['stage'] = value['stage']
                 if value.get('checkpoint') in (
-                        'controller_identity', 'collection_manifest', 'constants_import',
+                        'controller_identity', 'callback_directory', 'callback_source',
+                        'collection_manifest', 'constants_import',
                         'collection_settings', 'environment_copy', 'workspace_create',
                         'config_write', 'inventory_write', 'playbook_lookup',
                         'playbook_execute', 'playbook_result', 'callback_decode',
@@ -212,6 +231,8 @@ def main(argv=None):
                         and all(type(x) is int for x in counts.values())):
                     attempt['command'] = counts
                 report['runtime_attempt'] = attempt
+                if type(value.get('callback_access_verified')) is bool:
+                    attempt['callback_access_verified'] = value['callback_access_verified']
                 if 'diagnostics' in value:
                     try:
                         attempt['diagnostics'] = protocol.validate_diagnostics(value['diagnostics'])

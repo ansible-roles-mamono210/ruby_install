@@ -6,6 +6,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -13,17 +14,42 @@ import tempfile
 from runtime_protocol import stderr_diagnostics
 
 COLLECTION_ROOT = '/home/circleci/.local/lib/python3.14/site-packages/ansible_collections'
+PAYLOAD_ROOT = Path('/p1')
+
+
+def check_callback_directory(root):
+    directory = root / 'callback_plugins'
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise ValueError('CALLBACK_DIRECTORY_TYPE')
+    if sorted(path.name for path in directory.iterdir()) != ['runtime_callback.py']:
+        raise ValueError('CALLBACK_DIRECTORY_CONTENTS')
+
+
+def check_callback_source(root):
+    source = root / 'callback_plugins/runtime_callback.py'
+    if not stat.S_ISREG(source.lstat().st_mode):
+        raise ValueError('CALLBACK_SOURCE_TYPE')
+    with source.open('rb') as stream:
+        data = stream.read(65537)
+    if not 0 < len(data) <= 65536:
+        raise ValueError('CALLBACK_SOURCE_SIZE')
 
 
 def main():
     report = {'schema': 'ruby-p1-runtime-controller-r11', 'status': 'INCOMPLETE',
               'stage': 'preflight'}
     checkpoint = 'controller_identity'
+    callback_access_verified = False
     try:
         if (len(sys.argv) != 2 or not re.fullmatch(r'ruby-p1-[0-9a-f]{32}-runtime-target', sys.argv[1])
                 or os.getuid() != 1000 or platform.python_version() != '3.14.10'
                 or importlib.metadata.version('ansible-core') != '2.21.6'):
             raise ValueError('CONTROLLER_BASELINE')
+        checkpoint = 'callback_directory'
+        check_callback_directory(PAYLOAD_ROOT)
+        checkpoint = 'callback_source'
+        check_callback_source(PAYLOAD_ROOT)
+        callback_access_verified = True
         checkpoint = 'collection_manifest'
         manifest = json.loads((Path(COLLECTION_ROOT) / 'community/docker/MANIFEST.json').read_text())
         if manifest['collection_info']['version'] != '5.4.0':
@@ -93,7 +119,7 @@ def main():
         report.update(status='PASSED', stage='finished')
     except Exception:
         report.update(status='INCOMPLETE', reason='RUNTIME_UNCONFIRMED',
-                      checkpoint=checkpoint)
+                      checkpoint=checkpoint, callback_access_verified=callback_access_verified)
     print(json.dumps(report, sort_keys=True))
     return 0 if report['status'] == 'PASSED' else 3
 

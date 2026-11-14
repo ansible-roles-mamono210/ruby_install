@@ -248,6 +248,102 @@ class RuntimeTargetTests(unittest.TestCase):
         self.assertNotIn('SECRET', out.getvalue())
 
 
+class PayloadPermissionTests(unittest.TestCase):
+    def test_modes_and_contents_are_fixed_under_restrictive_umasks(self):
+        for mask in (0o022, 0o077, 0o777):
+            with self.subTest(umask=mask), tempfile.TemporaryDirectory() as tmp:
+                previous = os.umask(mask)
+                try:
+                    observed = h.stage_payload(tmp)
+                finally:
+                    os.umask(previous)
+                self.assertEqual(observed['callback_mode_before'], 0o755 & ~mask)
+                self.assertEqual(observed['callback_mode_after'], 0o755)
+                self.assertTrue(observed['source_modes_verified'])
+                self.assertIs(observed['host_uid_matches_controller'], os.getuid() == 1000)
+                for name in h.FILES:
+                    destination = Path(tmp) / ('callback_plugins' if name == 'runtime_callback.py' else '') / name
+                    self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o444)
+                    self.assertEqual(destination.read_bytes(), (h.ROOT / name).read_bytes())
+                c.check_callback_directory(Path(tmp))
+                c.check_callback_source(Path(tmp))
+
+    def test_existing_callback_directory_is_not_reused_or_chmodded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            callbacks = Path(tmp) / 'callback_plugins'
+            callbacks.mkdir()
+            callbacks.chmod(0o700)
+            (callbacks / 'sentinel').write_text('keep')
+            with self.assertRaises(FileExistsError):
+                h.stage_payload(tmp)
+            self.assertEqual(stat.S_IMODE(callbacks.stat().st_mode), 0o700)
+            self.assertEqual((callbacks / 'sentinel').read_text(), 'keep')
+
+    def test_ineffective_permission_fix_is_rejected(self):
+        real_chmod = Path.chmod
+        def chmod(path, mode, **kw):
+            if path.name != 'callback_plugins':
+                return real_chmod(path, mode, **kw)
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.umask(0o077)
+            try:
+                with patch.object(h.Path, 'chmod', new=chmod), self.assertRaises(h.Stop) as error:
+                    h.stage_payload(tmp)
+                self.assertEqual(str(error.exception), 'PAYLOAD_PERMISSION_MISMATCH')
+            finally:
+                os.umask(previous)
+
+    @unittest.skipIf(os.geteuid() == 0, 'real DAC-denial test requires a non-root runner')
+    def test_real_directory_and_source_access_denials_are_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            h.stage_payload(root)
+            directory = root / 'callback_plugins'
+            source = directory / 'runtime_callback.py'
+            directory.chmod(0o000)
+            try:
+                with self.assertRaises(PermissionError) as error:
+                    c.check_callback_directory(root)
+                self.assertEqual(error.exception.errno, 13)
+            finally:
+                directory.chmod(0o755)
+            source.chmod(0o000)
+            try:
+                c.check_callback_directory(root)
+                with self.assertRaises(PermissionError) as error:
+                    c.check_callback_source(root)
+                self.assertEqual(error.exception.errno, 13)
+            finally:
+                source.chmod(0o444)
+
+    def test_callback_layout_rejects_links_extras_and_unbounded_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / 'callback_plugins'
+            directory.mkdir()
+            source = directory / 'runtime_callback.py'
+            source.write_text('x')
+            for length in (0, 65537):
+                source.write_bytes(b'x' * length)
+                with self.assertRaises(ValueError):
+                    c.check_callback_source(root)
+            source.write_bytes(b'x' * 65536)
+            c.check_callback_source(root)
+            (directory / 'extra.py').write_text('x')
+            with self.assertRaises(ValueError):
+                c.check_callback_directory(root)
+            (directory / 'extra.py').unlink()
+            source.unlink()
+            source.symlink_to(root / 'missing')
+            with self.assertRaises(ValueError):
+                c.check_callback_source(root)
+            source.unlink()
+            directory.rmdir()
+            directory.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                c.check_callback_directory(root)
+
+
 class RuntimeControllerTests(unittest.TestCase):
     """Exercise real control flow/files with fault injection, without Ansible."""
 
@@ -306,7 +402,17 @@ class RuntimeControllerTests(unittest.TestCase):
             manifest.parent.mkdir(parents=True)
             manifest.write_text(json.dumps({'collection_info': {'version':
                                 '0.0.0' if fault == 'collection_manifest' else '5.4.0'}}))
+            payload = Path(manifest_root) / 'payload'
+            payload.mkdir()
+            h.stage_payload(payload)
+            check_directory = c.check_callback_directory
+            check_source = c.check_callback_source
             with patch.object(c, 'COLLECTION_ROOT', manifest_root), \
+                    patch.object(c, 'PAYLOAD_ROOT', payload), \
+                    patch.object(c, 'check_callback_directory', side_effect=(
+                        PermissionError('SECRET directory') if fault == 'callback_directory' else check_directory)), \
+                    patch.object(c, 'check_callback_source', side_effect=(
+                        PermissionError('SECRET source') if fault == 'callback_source' else check_source)), \
                     patch.object(c.sys, 'argv', ['runtime_controller.py', 'ruby-p1-' + 'a' * 32 + '-runtime-target']), \
                     patch.object(c.os, 'getuid', return_value=0 if fault == 'controller_identity' else 1000), \
                     patch.object(c.platform, 'python_version', return_value='3.14.10'), \
@@ -347,7 +453,8 @@ class RuntimeControllerTests(unittest.TestCase):
         self.assertEqual(report['checkpoint'], 'constants_import')
 
     def test_preflight_faults_stop_before_playbook_and_identify_checkpoint(self):
-        for fault in ('controller_identity', 'collection_manifest', 'constants_import',
+        for fault in ('controller_identity', 'callback_directory', 'callback_source',
+                      'collection_manifest', 'constants_import',
                       'workspace_create', 'config_write', 'inventory_write', 'playbook_lookup'):
             with self.subTest(fault=fault):
                 rc, report, calls, _ = self.run_controller(fault=fault)
@@ -363,6 +470,20 @@ class RuntimeControllerTests(unittest.TestCase):
                 rc, report, calls, _ = self.run_controller(paths=paths, scan=scan)
                 self.assertEqual((rc, calls), (3, 0))
                 self.assertEqual(report['checkpoint'], 'collection_settings')
+
+    def test_callback_access_failure_stops_before_ansible_and_is_not_echoed(self):
+        for fault in ('callback_directory', 'callback_source'):
+            with self.subTest(fault=fault):
+                rc, report, calls, captured = self.run_controller(fault=fault)
+                self.assertEqual((rc, calls), (3, 0))
+                self.assertEqual(report['checkpoint'], fault)
+                self.assertFalse(report['callback_access_verified'])
+                self.assertNotIn('constants_imported', captured)
+        rc, report, calls, _ = self.run_controller(result=subprocess.CompletedProcess(
+            [], 250, '', 'AnsibleError: [Errno 13] SECRET'))
+        self.assertEqual((rc, calls), (3, 1))
+        self.assertTrue(report['callback_access_verified'])
+        self.assertEqual(report['status'], 'INCOMPLETE')
 
     def test_playbook_failure_or_warning_is_not_accepted(self):
         for result in (subprocess.CompletedProcess([], 2, 'SECRET', ''),
@@ -487,7 +608,8 @@ class RuntimeHostTests(unittest.TestCase):
             '<< pipeline.parameters.run_p1_env_probe >>',
             {'equal': [h.BRANCH, '<< pipeline.git.branch >>']}])
 
-    def mocked_main(self, runtime=None, cleanup_ok=True, manifest_fail=False, controller_rc=0):
+    def mocked_main(self, runtime=None, cleanup_ok=True, manifest_fail=False, controller_rc=0,
+                    payload_failure=False):
         runtime = valid_report() if runtime is None else runtime
         inventory = SimpleNamespace(now=lambda: '2026-11-14T00:00:00Z')
 
@@ -515,6 +637,8 @@ class RuntimeHostTests(unittest.TestCase):
                 patch.object(h, 'load', side_effect=lambda n: inventory if n == 'env_probe' else p), \
                 patch.object(h, 'command', side_effect=command) as commands, \
                 patch.object(h, 'inspect_image', return_value={}), \
+                patch.object(h, 'stage_payload', side_effect=(
+                    h.Stop('PAYLOAD_PERMISSION_MISMATCH') if payload_failure else h.stage_payload)), \
                 patch.object(h, 'cleanup', return_value=cleanup_ok) as cleanup, \
                 contextlib.redirect_stdout(io.StringIO()):
             real_stat = os_stat._mock_wraps
@@ -535,6 +659,30 @@ class RuntimeHostTests(unittest.TestCase):
             self.assertIs(result[key], False)
         self.assertEqual(clean_count, 2)
         self.assertTrue(result['cleanup_confirmed'])
+
+    def test_payload_failure_stops_before_controller_and_cleans_target(self):
+        rc, result, clean_count, _ = self.mocked_main(payload_failure=True)
+        self.assertEqual(rc, 3)
+        self.assertEqual(result['stage'], 'payload_prepare')
+        self.assertEqual(result['reason'], 'PAYLOAD_PERMISSION_MISMATCH')
+        self.assertEqual(clean_count, 1)
+        self.assertEqual(result['cleanup'], {'target': True})
+        self.assertFalse(result['fixture_become_verified'])
+
+    def test_callback_access_flag_is_boolean_only_at_host_boundary(self):
+        for flag in (True, False, 'SECRET', 1, None):
+            with self.subTest(flag=flag):
+                value = {'status': 'INCOMPLETE', 'stage': 'preflight',
+                         'checkpoint': 'callback_source', 'callback_access_verified': flag}
+                rc, result, clean_count, _ = self.mocked_main(value, controller_rc=3)
+                self.assertEqual((rc, clean_count), (3, 2))
+                self.assertEqual(result['runtime_attempt']['checkpoint'], 'callback_source')
+                if type(flag) is bool:
+                    self.assertIs(result['runtime_attempt']['callback_access_verified'], flag)
+                else:
+                    self.assertNotIn('callback_access_verified', result['runtime_attempt'])
+                self.assertFalse(result['fixture_become_verified'])
+                self.assertNotIn('SECRET', json.dumps(result))
 
     def test_failed_runtime_preserves_only_safe_diagnostics_and_cleans_both(self):
         value = {'status': 'INCOMPLETE', 'stage': 'ansible_playbook', 'reason': 'SECRET',
