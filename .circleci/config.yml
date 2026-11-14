@@ -51,17 +51,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Check Ansible runtime and disposable sudo fixture
-          no_output_timeout: 5m
+          name: Measure fixed Ruby source URLs and SHA-256
+          no_output_timeout: 13m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
             timeout --signal=TERM --kill-after=30s 12m \
-              python3 scripts/p1/runtime_smoke.py \
-              --allow-pull --ephemeral-ci \
-              --allow-ci-docker-api --allow-disposable-sudo-fixture \
+              python3 scripts/p1/source_probe.py \
+              --allow-pull --ephemeral-ci --allow-source-download \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
