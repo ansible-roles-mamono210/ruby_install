@@ -1,0 +1,79 @@
+---
+- name: Fixed controller to disposable target runtime checks
+  hosts: target
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_pipelining: true
+    ansible_remote_tmp: "/tmp/ruby-p1-ansible-{{ ansible_user }}"
+    ansible_docker_privileged: false
+    ansible_docker_docker_host: unix:///var/run/docker.sock
+    ansible_docker_timeout: 20
+  tasks:
+    - name: P1 limited facts
+      ansible.builtin.setup:
+        gather_subset: ['!all', '!min', distribution, platform, user]
+        filter:
+          - ansible_distribution
+          - ansible_distribution_major_version
+          - ansible_python_version
+          - ansible_user_uid
+        gather_timeout: 10
+      no_log: true
+      register: p1_facts
+
+    - name: P1 validate facts
+      ansible.builtin.assert:
+        that:
+          - p1_facts.ansible_facts.ansible_distribution == 'CentOS'
+          - p1_facts.ansible_facts.ansible_distribution_major_version == '9'
+          - p1_facts.ansible_facts.ansible_python_version == '3.9.19'
+          - p1_facts.ansible_facts.ansible_user_uid == 0
+        quiet: true
+      no_log: true
+
+    - name: P1 stock baseline
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.file', '/p1/runtime_target.py') }}"
+          - baseline
+      changed_when: false
+      no_log: true
+
+    - name: P1 create disposable fixture
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.file', '/p1/runtime_target.py') }}"
+          - fixture
+      changed_when: true
+      no_log: true
+
+    - name: P1 nonroot identity
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, -c, 'import os; print(os.geteuid())']
+      vars:
+        ansible_user: ruby_p1_probe
+      become: false
+      changed_when: false
+      no_log: true
+
+    - name: P1 become identity
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, -c, 'import os; print(os.geteuid())']
+      vars:
+        ansible_user: ruby_p1_probe
+      become: true
+      become_method: ansible.builtin.sudo
+      become_user: root
+      become_flags: -H -S -n
+      changed_when: false
+      no_log: true
