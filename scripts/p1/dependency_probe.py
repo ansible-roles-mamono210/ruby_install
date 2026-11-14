@@ -122,6 +122,24 @@ def validate_condition(item, crb, worker):
         raise Stop('WORKER_SCHEMA')
 
 
+def valid_error_chain(value, worker):
+    if (type(value) is not dict or set(value) != {'state', 'items'}
+            or type(value['state']) is not str or value['state'] not in ('COMPLETE', 'CYCLE', 'LIMIT')
+            or type(value['items']) is not list or not 1 <= len(value['items']) <= worker.CHAIN_LIMIT
+            or (value['state'] == 'LIMIT' and len(value['items']) != worker.CHAIN_LIMIT)):
+        return False
+    allowed = {'kind': worker.CHAIN_KINDS, 'errno': ('NONE', 'OTHER', *worker.ERRNO_CODES.values()),
+               'frame': worker.FRAME_TAGS, 'frames': ('COMPLETE', 'LIMIT')}
+    for index, item in enumerate(value['items']):
+        if (type(item) is not dict or set(item) != set(allowed) | {'link'}
+                or type(item['link']) is not str
+                or item['link'] not in (('SELF',) if index == 0 else ('CAUSE', 'CONTEXT'))
+                or any(type(item[k]) is not str or item[k] not in values
+                       for k, values in allowed.items())):
+            return False
+    return True
+
+
 def failure_summary(stdout, worker):
     """Extract a bounded enum-only failure report, never authorize a successful run."""
     if len(stdout.encode()) > 8192:
@@ -152,12 +170,14 @@ def failure_summary(stdout, worker):
                'exception_kind': worker.EXCEPTION_KINDS,
                'errno': ('NONE', 'OTHER', *worker.ERRNO_CODES.values()),
                'state_check': worker.STATE_CHECKS}
-    if (type(detail) is not dict or set(detail) != set(allowed)
+    if (type(detail) is not dict or set(detail) != set(allowed) | {'error_chain'}
             or any(type(detail[key]) is not str or detail[key] not in values
-                   for key, values in allowed.items())):
+                   for key, values in allowed.items())
+            or not valid_error_chain(detail['error_chain'], worker)):
         return {'state': 'INVALID_SCHEMA'}
     return {'state': 'VALIDATED_FAILURE_ONLY', 'reason': value['reason'],
-            'worker_stage': value['stage'], 'diagnostic': {k: detail[k] for k in allowed}}
+            'worker_stage': value['stage'],
+            'diagnostic': dict({k: detail[k] for k in allowed}, error_chain=detail['error_chain'])}
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
@@ -175,12 +195,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-dependency-run-r23', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-dependency-run-r24', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-dependency-r23'
+    name = 'ruby-p1-' + run_id + '-dependency-r24'
     handlers = {}
     try:
         def interrupted(_signum, _frame):

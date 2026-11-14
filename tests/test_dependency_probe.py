@@ -135,7 +135,143 @@ def failure_report():
             'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'diagnostic': {
                 'stage': 'metadata_load', 'condition': 'crb_off', 'package': 'none',
                 'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'exception_kind': 'OS_ERROR',
-                'errno': 'EROFS', 'state_check': 'MATCH'}}
+                'errno': 'EROFS', 'state_check': 'MATCH',
+                'error_chain': w.error_chain(OSError(errno.EROFS, 'SECRET'))}}
+
+
+def raised_in(module, name, error, inner=None):
+    namespace = {'__name__': module, 'error': error, 'inner': inner}
+    body = 'inner()' if inner is not None else 'raise error'
+    exec(compile('def ' + name + '():\n    ' + body + '\n', '/PRIVATE_SOURCE', 'exec'), namespace)
+    return namespace[name]
+
+
+class ErrorChainTests(unittest.TestCase):
+    def test_known_dnf_kinds_and_unknown_names_never_stringify(self):
+        def forbidden(_self):
+            raise AssertionError('must not stringify')
+        for name, expected in w.DNF_ERROR_NAMES.items():
+            cls = type(name, (Exception,), {'__module__': 'dnf.exceptions', '__str__': forbidden})
+            item = w.error_chain(cls('PRIVATE_MESSAGE'))['items'][0]
+            self.assertEqual(item['kind'], expected)
+            self.assertNotIn('PRIVATE', json.dumps(item))
+        for module, name in [('PRIVATE_MODULE', 'RepoError'), ('dnf.exceptions', 'PRIVATE_CLASS')]:
+            cls = type(name, (Exception,), {'__module__': module, '__str__': forbidden})
+            self.assertEqual(w.error_chain(cls('PRIVATE'))['items'][0]['kind'], 'OTHER')
+        cls = type('Error', (Exception,), {'__module__': 'libdnf.error'})
+        self.assertEqual(w.error_chain(cls('PRIVATE'))['items'][0]['kind'], 'LIBDNF_ERROR')
+
+    def test_deepest_allowlisted_frame_and_unknown_module_are_distinct(self):
+        cases = [('dnf.repo', 'load', 'REPOSITORY_LOAD'),
+                 ('dnf.sack', '_build_sack', 'SACK_CREATE'),
+                 ('dnf.lock', '_try_lock', 'LOCK_ACQUIRE'),
+                 ('PRIVATE_MODULE', 'load', 'UNMAPPED'),
+                 ('dnf.repo', 'PRIVATE_FUNCTION', 'UNMAPPED')]
+        for module, name, expected in cases:
+            inner = raised_in(module, name, RuntimeError('PRIVATE_MESSAGE'))
+            outer = raised_in('dnf.base', 'fill_sack', None, inner)
+            try:
+                outer()
+            except RuntimeError as error:
+                value = w.error_chain(error)
+            self.assertEqual(value['items'][0]['frame'],
+                             'FILL_SACK' if expected == 'UNMAPPED' else expected)
+            self.assertEqual(value['items'][0]['frames'], 'COMPLETE')
+            self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_implicit_context_keeps_os_errno_without_claiming_cause(self):
+        cls = type('RepoError', (Exception,), {'__module__': 'dnf.exceptions'})
+        try:
+            try:
+                raise PermissionError(errno.EACCES, 'PRIVATE_URL', '/PRIVATE_PATH')
+            except PermissionError:
+                raise cls('PRIVATE_WRAP')
+        except cls as error:
+            value = w.error_chain(error)
+        self.assertEqual([(x['link'], x['kind'], x['errno']) for x in value['items']],
+                         [('SELF', 'DNF_REPO_ERROR', 'NONE'),
+                          ('CONTEXT', 'PERMISSION_ERROR', 'EACCES')])
+        self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_explicit_cause_takes_precedence_over_context(self):
+        outer = RuntimeError('PRIVATE')
+        outer.__cause__ = OSError(errno.EROFS, 'PRIVATE_CAUSE')
+        outer.__context__ = ValueError('PRIVATE_CONTEXT')
+        value = w.error_chain(outer)
+        self.assertEqual([(x['link'], x['errno']) for x in value['items']],
+                         [('SELF', 'NONE'), ('CAUSE', 'EROFS')])
+
+    def test_suppressed_context_is_not_followed(self):
+        outer = RuntimeError('PRIVATE')
+        outer.__context__ = OSError(errno.EACCES, 'PRIVATE')
+        outer.__suppress_context__ = True
+        self.assertEqual(len(w.error_chain(outer)['items']), 1)
+
+    def test_cycle_and_chain_limit_are_bounded_and_reported(self):
+        a, b = RuntimeError('PRIVATE'), ValueError('PRIVATE')
+        a.__cause__, b.__cause__ = b, a
+        value = w.error_chain(a)
+        self.assertEqual((value['state'], len(value['items'])), ('CYCLE', 2))
+        chain = [RuntimeError('PRIVATE') for _ in range(6)]
+        for left, right in zip(chain, chain[1:]):
+            left.__cause__ = right
+        value = w.error_chain(chain[0])
+        self.assertEqual((value['state'], len(value['items'])), ('LIMIT', 4))
+
+    def test_frame_walk_has_a_fixed_bound(self):
+        def recurse(n):
+            if n:
+                recurse(n - 1)
+            else:
+                raise RuntimeError('PRIVATE')
+        try:
+            recurse(70)
+        except RuntimeError as error:
+            value = w.error_chain(error)
+        self.assertEqual(value['items'][0]['frames'], 'LIMIT')
+        self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_non_string_module_metadata_is_not_exported_or_used_as_a_key(self):
+        fn = raised_in(['PRIVATE_MODULE'], 'load', ValueError('PRIVATE'))
+        try:
+            fn()
+        except ValueError as error:
+            value = w.error_chain(error)
+        self.assertEqual(value['items'][0]['frame'], 'UNMAPPED')
+
+    def test_parser_accepts_diagnostics_only_as_failure(self):
+        value = failure_report()
+        value['diagnostic']['error_chain']['items'][0].update(
+            kind='DNF_REPO_ERROR', errno='NONE', frame='REPOSITORY_LOAD')
+        summary = h.failure_summary(json.dumps(value), w)
+        self.assertEqual(summary['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertEqual(summary['diagnostic']['error_chain'], value['diagnostic']['error_chain'])
+        with self.assertRaises(h.Stop):
+            h.validate(value, w)
+
+    def test_parser_rejects_malformed_chain_and_extra_or_unbounded_content(self):
+        mutations = [lambda c: c.update(state='PRIVATE'), lambda c: c.update(items=[]),
+                     lambda c: c.update(items=c['items'] * 5), lambda c: c.update(message='PRIVATE'),
+                     lambda c: c.update(state='LIMIT'),
+                     lambda c: c['items'][0].update(kind='PRIVATE'),
+                     lambda c: c['items'][0].update(errno=13),
+                     lambda c: c['items'][0].update(frame='PRIVATE'),
+                     lambda c: c['items'][0].update(frames=True),
+                     lambda c: c['items'][0].update(link='CAUSE'),
+                     lambda c: c['items'][0].update(path='/PRIVATE'),
+                     lambda c: c['items'].append(dict(c['items'][0]))]
+        for mutate in mutations:
+            value = failure_report()
+            mutate(value['diagnostic']['error_chain'])
+            self.assertEqual(h.failure_summary(json.dumps(value), w), {'state': 'INVALID_SCHEMA'})
+        for invalid in (None, [], 'PRIVATE'):
+            value = failure_report()
+            value['diagnostic']['error_chain'] = invalid
+            self.assertEqual(h.failure_summary(json.dumps(value), w), {'state': 'INVALID_SCHEMA'})
+
+    def test_parser_rejects_nested_duplicate_keys(self):
+        value = json.dumps(failure_report()).replace('"link":', '"link":"PRIVATE","link":', 1)
+        self.assertEqual(h.failure_summary(value, w), {'state': 'INVALID_JSON'})
 
 
 class TemporaryRootTests(unittest.TestCase):

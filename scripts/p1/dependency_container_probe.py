@@ -17,7 +17,7 @@ SUCCESS = 'DEPENDENCY_SOLVER_MEASURED'
 PACKAGES = ('gcc', 'make', 'tar', 'gzip', 'ca-certificates', 'openssl-devel',
             'libyaml-devel', 'zlib-devel', 'libffi-devel')
 REPOS = ('baseos', 'appstream', 'crb')
-SCHEMA = 'ruby-p1-dependency-container-r23'
+SCHEMA = 'ruby-p1-dependency-container-r24'
 MAX_ROWS = 256
 TOKEN = re.compile(r'[A-Za-z0-9_+.~:^@-]{1,160}\Z')
 FAILURE_REASONS = frozenset({
@@ -40,6 +40,29 @@ EXCEPTION_KINDS = frozenset({'STOP', 'PERMISSION_ERROR', 'FILE_NOT_FOUND', 'TIME
 ERRNO_CODES = {getattr(errno, n): n for n in
                ('EACCES', 'EPERM', 'EROFS', 'ENOENT', 'ENOSPC', 'ENOMEM', 'ETIMEDOUT', 'EIO')}
 STATE_CHECKS = frozenset({'NOT_STARTED', 'PENDING', 'MATCH', 'CHANGED', 'ERROR'})
+CHAIN_LIMIT = 4
+FRAME_LIMIT = 64
+DNF_ERROR_NAMES = {
+    'Error': 'DNF_ERROR', 'RepoError': 'DNF_REPO_ERROR',
+    'MetadataError': 'DNF_METADATA_ERROR', 'DatabaseError': 'DNF_DATABASE_ERROR',
+    'ConfigError': 'DNF_CONFIG_ERROR', 'LockError': 'DNF_LOCK_ERROR',
+    'ProcessLockError': 'DNF_PROCESS_LOCK_ERROR', 'ThreadLockError': 'DNF_THREAD_LOCK_ERROR'}
+CHAIN_KINDS = EXCEPTION_KINDS | frozenset(DNF_ERROR_NAMES.values()) | {'LIBDNF_ERROR'}
+DNF_FRAMES = {
+    ('dnf.base', 'fill_sack'): 'FILL_SACK',
+    ('dnf.base', '_add_repo_to_sack'): 'ADD_REPOSITORY',
+    ('dnf.base', '_setup_excludes_includes'): 'EXCLUDES',
+    ('dnf.base', '_setup_modular_excludes'): 'MODULE_FILTER',
+    ('dnf.sack', '_build_sack'): 'SACK_CREATE',
+    ('dnf.sack', '__init__'): 'SACK_CREATE',
+    ('dnf.sack', '_configure'): 'SACK_CONFIGURE',
+    ('dnf.repo', 'load'): 'REPOSITORY_LOAD',
+    ('dnf.lock', 'build_metadata_lock'): 'METADATA_LOCK_CREATE',
+    ('dnf.lock', '_fit_lock_dir'): 'LOCK_DIRECTORY',
+    ('dnf.lock', '__enter__'): 'LOCK_ENTER',
+    ('dnf.lock', '_try_lock'): 'LOCK_ACQUIRE',
+    ('dnf.lock', '__exit__'): 'LOCK_EXIT'}
+FRAME_TAGS = frozenset(DNF_FRAMES.values()) | {'UNMAPPED'}
 
 
 class Stop(Exception):
@@ -58,10 +81,8 @@ def failure_reason(error):
     return 'DEPENDENCY_API_OR_METADATA_ERROR'
 
 
-def remember_failure(trace, error):
-    """Record only fixed enums; never stringify exception text, paths or traceback."""
-    if trace is None or trace['failure'] is not None:
-        return
+def exception_codes(error):
+    """Classify built-in exceptions without reading their text."""
     kind = 'OTHER'
     for cls, label in ((Stop, 'STOP'), (PermissionError, 'PERMISSION_ERROR'),
             (FileNotFoundError, 'FILE_NOT_FOUND'), (TimeoutError, 'TIMEOUT'),
@@ -76,9 +97,54 @@ def remember_failure(trace, error):
     if isinstance(error, OSError):
         number = error.errno
         code = ERRNO_CODES.get(number, 'OTHER') if type(number) is int else 'OTHER'
+    return kind, code
+
+
+def error_chain(error):
+    """Bounded passive observations, never formatted traceback, locals or messages."""
+    result, seen, link = [], set(), 'SELF'
+    while error is not None:
+        if id(error) in seen:
+            return {'state': 'CYCLE', 'items': result}
+        if len(result) == CHAIN_LIMIT:
+            return {'state': 'LIMIT', 'items': result}
+        seen.add(id(error))
+        kind, code = exception_codes(error)
+        cls = type(error)
+        if cls.__module__ == 'dnf.exceptions':
+            kind = DNF_ERROR_NAMES.get(cls.__name__, kind)
+        elif (cls.__module__, cls.__name__) == ('libdnf.error', 'Error'):
+            kind = 'LIBDNF_ERROR'
+        frame_tag, count, tb = 'UNMAPPED', 0, error.__traceback__
+        while tb is not None and count < FRAME_LIMIT:
+            # Only module/function identifiers are matched in memory. No paths or locals.
+            module = tb.tb_frame.f_globals.get('__name__')
+            if type(module) is str:
+                label = DNF_FRAMES.get((module, tb.tb_frame.f_code.co_name))
+                if label is not None:
+                    frame_tag = label
+            count += 1
+            tb = tb.tb_next
+        result.append({'link': link, 'kind': kind, 'errno': code, 'frame': frame_tag,
+                       'frames': 'LIMIT' if tb is not None else 'COMPLETE'})
+        if error.__cause__ is not None:
+            error, link = error.__cause__, 'CAUSE'
+        elif not error.__suppress_context__:
+            error, link = error.__context__, 'CONTEXT'
+        else:
+            error = None
+    return {'state': 'COMPLETE', 'items': result}
+
+
+def remember_failure(trace, error):
+    """Record fixed enums only; do not retain exception or frame objects."""
+    if trace is None or trace['failure'] is not None:
+        return
+    kind, code = exception_codes(error)
     trace['failure'] = {'stage': trace['stage'], 'condition': trace['condition'],
                         'package': trace['package'], 'reason': failure_reason(error),
-                        'exception_kind': kind, 'errno': code}
+                        'exception_kind': kind, 'errno': code,
+                        'error_chain': error_chain(error)}
 
 
 def token(value):
