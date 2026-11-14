@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 
+from runtime_protocol import stderr_diagnostics
+
 COLLECTION_ROOT = '/home/circleci/.local/lib/python3.14/site-packages/ansible_collections'
 
 
@@ -76,6 +78,7 @@ def main():
                                  'stdout_bytes': len(p.stdout.encode()),
                                  'stderr_bytes': len(p.stderr.encode())}
             if p.returncode or p.stderr or len(p.stdout.encode()) > 32768:
+                report['diagnostics'] = stderr_diagnostics(p.stderr)
                 raise ValueError('PLAYBOOK_FAILED_OR_WARNING')
             checkpoint = 'callback_decode'
             value = json.loads(p.stdout)

@@ -212,6 +212,11 @@ def main(argv=None):
                         and all(type(x) is int for x in counts.values())):
                     attempt['command'] = counts
                 report['runtime_attempt'] = attempt
+                if 'diagnostics' in value:
+                    try:
+                        attempt['diagnostics'] = protocol.validate_diagnostics(value['diagnostics'])
+                    except (ValueError, TypeError, KeyError):
+                        attempt['diagnostics_rejected'] = True
                 raise Stop('CONTROLLER_RUNTIME_UNCONFIRMED')
             if controller_rc != 0:
                 raise Stop('CONTROLLER_EXIT_STATUS_MISMATCH')

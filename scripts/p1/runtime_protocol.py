@@ -1,5 +1,104 @@
 """Strict allowlisted runtime evidence protocol, shared by host and callback."""
 import json
+import re
+
+DIAGNOSTIC_SCHEMA = 'ruby-p1-stderr-markers-r13'
+DIAGNOSTIC_LIMIT = 32768
+DIAGNOSTIC_CLASSES = ('EMPTY', 'MARKERS_FOUND', 'UNCLASSIFIED', 'TOO_LARGE',
+                      'UNSUPPORTED_CONTROL', 'INVALID_TYPE')
+EXCEPTION_LABELS = ('AnsibleError', 'AssertionError', 'AttributeError',
+                    'BrokenPipeError', 'ConnectionError', 'ConnectionRefusedError',
+                    'EOFError', 'FileExistsError', 'FileNotFoundError', 'ImportError',
+                    'KeyError', 'MemoryError', 'ModuleNotFoundError', 'NotImplementedError',
+                    'OSError', 'PermissionError', 'RecursionError', 'RuntimeError',
+                    'TimeoutError', 'TypeError', 'ValueError')
+COMPONENT_PATHS = (
+    ('ANSIBLE_CLI', '/ansible/cli/__init__.py'),
+    ('ANSIBLE_PLUGIN_LOADER', '/ansible/plugins/loader.py'),
+    ('ANSIBLE_TASK_QUEUE', '/ansible/executor/task_queue_manager.py'),
+    ('ANSIBLE_RPC_HOST', '/ansible/_internal/_rpc_host.py'),
+    ('ANSIBLE_CALLBACK_BASE', '/ansible/plugins/callback/__init__.py'),
+    ('PROBE_CALLBACK', '/p1/callback_plugins/runtime_callback.py'),
+    ('PROBE_PROTOCOL', '/p1/runtime_protocol.py'),
+)
+COMPONENT_LABELS = tuple(label for label, _path in COMPONENT_PATHS)
+ERRNO_MARKERS = (('EPERM', '[Errno 1]'), ('ENOENT', '[Errno 2]'),
+                 ('EACCES', '[Errno 13]'), ('ENOSPC', '[Errno 28]'),
+                 ('EROFS', '[Errno 30]'))
+ERRNO_LABELS = tuple(label for label, _marker in ERRNO_MARKERS)
+
+
+def stderr_diagnostics(stderr):
+    """Emit only finite labels and booleans; matching text is never returned.
+
+    These are textual clues, not a verified traceback or a root-cause verdict.
+    Every nonempty stderr still fails the controller's existing success gate.
+    """
+    value = {'schema': DIAGNOSTIC_SCHEMA, 'classification': 'EMPTY',
+             'traceback_present': False, 'unexpected_exception_banner': False,
+             'exception_types': [], 'components': [], 'errno_labels': []}
+    if type(stderr) is not str:
+        value['classification'] = 'INVALID_TYPE'
+        return value
+    if len(stderr) > DIAGNOSTIC_LIMIT or len(stderr.encode('utf-8', errors='replace')) > DIAGNOSTIC_LIMIT:
+        value['classification'] = 'TOO_LARGE'
+        return value
+    if not stderr:
+        return value
+    # Accept only SGR color codes; other terminal controls are not interpreted.
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', stderr)
+    if any((ord(char) < 32 and char not in '\n\r\t') or 127 <= ord(char) < 160 for char in clean):
+        value['classification'] = 'UNSUPPORTED_CONTROL'
+        return value
+    lines = clean.splitlines()
+    value['traceback_present'] = any(line.strip() == 'Traceback (most recent call last):' for line in lines)
+    value['unexpected_exception_banner'] = 'Unexpected Exception, this is probably a bug.' in clean
+    for label in EXCEPTION_LABELS:
+        pattern = r'^\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*' + label + r'(?=:|$)'
+        if any(re.match(pattern, line) for line in lines):
+            value['exception_types'].append(label)
+    frame_paths = []
+    for line in lines:
+        match = re.fullmatch(r'\s*File "([^"\r\n]{1,2048})", line [0-9]{1,7}(?:, in [^\r\n]{1,256})?\s*', line)
+        if match:
+            frame_paths.append(match[1])
+    for label, path in COMPONENT_PATHS:
+        if any(frame == path if label.startswith('PROBE_') else frame.endswith(path) for frame in frame_paths):
+            value['components'].append(label)
+    for label, marker in ERRNO_MARKERS:
+        if marker in clean:
+            value['errno_labels'].append(label)
+    if any(value[key] for key in ('traceback_present', 'unexpected_exception_banner',
+                                  'exception_types', 'components', 'errno_labels')):
+        value['classification'] = 'MARKERS_FOUND'
+    else:
+        value['classification'] = 'UNCLASSIFIED'
+    return value
+
+
+def validate_diagnostics(value):
+    """Validate the controller boundary, rebuilding from approved constants."""
+    keys = {'schema', 'classification', 'traceback_present', 'unexpected_exception_banner',
+            'exception_types', 'components', 'errno_labels'}
+    if (type(value) is not dict or set(value) != keys
+            or value['schema'] != DIAGNOSTIC_SCHEMA
+            or value['classification'] not in DIAGNOSTIC_CLASSES
+            or any(type(value[k]) is not bool for k in ('traceback_present', 'unexpected_exception_banner'))):
+        raise ValueError('DIAGNOSTIC_SCHEMA')
+    result = {key: value[key] for key in ('schema', 'classification', 'traceback_present', 'unexpected_exception_banner')}
+    for key, allowed in (('exception_types', EXCEPTION_LABELS),
+                         ('components', COMPONENT_LABELS), ('errno_labels', ERRNO_LABELS)):
+        entries = value[key]
+        if (type(entries) is not list or len(entries) > len(allowed)
+                or any(type(item) is not str or item not in allowed for item in entries)
+                or entries != [item for item in allowed if item in entries]):
+            raise ValueError('DIAGNOSTIC_LABEL')
+        result[key] = [item for item in allowed if item in entries]
+    has_markers = any(result[key] for key in ('traceback_present', 'unexpected_exception_banner',
+                                             'exception_types', 'components', 'errno_labels'))
+    if (result['classification'] == 'MARKERS_FOUND') != bool(has_markers):
+        raise ValueError('DIAGNOSTIC_CLASSIFICATION')
+    return result
 
 TASKS = ('P1 limited facts', 'P1 validate facts', 'P1 stock baseline',
          'P1 create disposable fixture', 'P1 nonroot identity', 'P1 become identity')

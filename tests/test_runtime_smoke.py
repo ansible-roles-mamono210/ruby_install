@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -28,9 +29,10 @@ def load(name):
 
 
 h = load('runtime_smoke')
-c = load('runtime_controller')
 t = load('runtime_target')
 p = load('runtime_protocol')
+with patch.dict(sys.modules, {'runtime_protocol': p}):
+    c = load('runtime_controller')
 
 
 def baseline():
@@ -95,6 +97,107 @@ class RuntimeProtocolTests(unittest.TestCase):
     def test_null_commands_are_observations_not_failure(self):
         value = p.selected(p.TASKS[2], {'rc': 0, 'stdout': json.dumps(baseline())})
         self.assertIsNone(value['direct']['commands']['ruby'])
+
+
+class RuntimeDiagnosticTests(unittest.TestCase):
+    def test_exception_chain_retains_only_finite_labels(self):
+        raw = ('[ERROR]: Unexpected Exception, this is probably a bug.\n'
+               'Traceback (most recent call last):\n'
+               '  File "/SECRET/site-packages/ansible/_internal/_rpc_host.py", line 123, in SECRET\n'
+               'PermissionError: [Errno 13] SECRET credentials and path\n'
+               'Traceback (most recent call last):\n'
+               '  File "/SECRET/site-packages/ansible/cli/__init__.py", line 42, in cli_executor\n'
+               'ansible.errors.AnsibleError: SECRET\n')
+        d = p.stderr_diagnostics(raw)
+        self.assertEqual(d['classification'], 'MARKERS_FOUND')
+        self.assertEqual(d['exception_types'], ['AnsibleError', 'PermissionError'])
+        self.assertEqual(d['components'], ['ANSIBLE_CLI', 'ANSIBLE_RPC_HOST'])
+        self.assertEqual(d['errno_labels'], ['EACCES'])
+        self.assertTrue(d['traceback_present'])
+        self.assertTrue(d['unexpected_exception_banner'])
+        self.assertEqual(p.validate_diagnostics(d), d)
+        for secret in ('SECRET', '/site-packages', '123', 'credentials', 'cli_executor'):
+            self.assertNotIn(secret, json.dumps(d))
+
+    def test_real_python_traceback_is_classified_without_message(self):
+        import traceback
+        try:
+            raise TypeError('SECRET')
+        except TypeError as ex:
+            d = p.stderr_diagnostics(''.join(traceback.format_exception(ex)))
+        self.assertEqual(d['exception_types'], ['TypeError'])
+        self.assertTrue(d['traceback_present'])
+        self.assertNotIn('SECRET', json.dumps(d))
+        self.assertEqual(d['components'], [])
+
+    def test_only_traceback_file_lines_create_component_labels(self):
+        raw = ('SECRET mentions /ansible/plugins/loader.py\n'
+               'message contains TypeError: SECRET\n'
+               '  File "/p1/callback_plugins/runtime_callback.py", line 22, in SECRET\n'
+               '  File "/SECRET/p1/runtime_protocol.py", line 23, in SECRET\n')
+        d = p.stderr_diagnostics(raw)
+        self.assertEqual(d['components'], ['PROBE_CALLBACK'])
+        self.assertEqual(d['exception_types'], [])
+        self.assertNotIn('SECRET', json.dumps(d))
+
+    def test_empty_unknown_and_nontext_do_not_guess_a_cause(self):
+        for raw, expected in (('', 'EMPTY'), ('SECRET unknown error', 'UNCLASSIFIED'),
+                              ('OtherPrivateError: SECRET', 'UNCLASSIFIED'),
+                              (None, 'INVALID_TYPE'), ({'SECRET': 'x'}, 'INVALID_TYPE')):
+            with self.subTest(expected=expected):
+                d = p.stderr_diagnostics(raw)
+                self.assertEqual(d['classification'], expected)
+                self.assertEqual(d['exception_types'], [])
+                self.assertEqual(p.validate_diagnostics(d), d)
+                self.assertNotIn('SECRET', json.dumps(d))
+
+    def test_sgr_only_and_untrusted_control_characters(self):
+        d = p.stderr_diagnostics('\x1b[31mTypeError: SECRET\x1b[0m\n')
+        self.assertEqual(d['exception_types'], ['TypeError'])
+        for raw in ('TypeError: SECRET\x00', '\x1b]52;c;SECRET\x07', 'TypeError: SECRET\x85'):
+            d = p.stderr_diagnostics(raw)
+            self.assertEqual(d['classification'], 'UNSUPPORTED_CONTROL')
+            self.assertEqual(p.validate_diagnostics(d), d)
+            self.assertNotIn('SECRET', json.dumps(d))
+
+    def test_byte_limit_and_multibyte_limit_do_not_publish_prefix(self):
+        for raw in ('TypeError: ' + 'x' * p.DIAGNOSTIC_LIMIT,
+                    '\u3042' * (p.DIAGNOSTIC_LIMIT // 3 + 1)):
+            d = p.stderr_diagnostics(raw)
+            self.assertEqual(d['classification'], 'TOO_LARGE')
+            self.assertEqual(d['exception_types'], [])
+            self.assertEqual(p.validate_diagnostics(d), d)
+        d = p.stderr_diagnostics('x' * p.DIAGNOSTIC_LIMIT)
+        self.assertEqual(d['classification'], 'UNCLASSIFIED')
+
+    def test_duplicate_markers_have_canonical_bounded_output(self):
+        raw = ('TypeError: [Errno 30] SECRET\nAnsibleError: SECRET\n' * 10)
+        d = p.stderr_diagnostics(raw)
+        self.assertEqual(d['exception_types'], ['AnsibleError', 'TypeError'])
+        self.assertEqual(d['errno_labels'], ['EROFS'])
+        self.assertEqual(p.validate_diagnostics(d), d)
+        self.assertLess(len(json.dumps(d)), 1024)
+
+    def test_host_validator_rejects_arbitrary_payloads_and_noncanonical_labels(self):
+        base = p.stderr_diagnostics('TypeError: SECRET\nAnsibleError: SECRET')
+        changes = [lambda d: d.update(raw='SECRET'),
+                   lambda d: d.update(schema='SECRET'),
+                   lambda d: d.update(classification='SECRET'),
+                   lambda d: d.update(traceback_present=1),
+                   lambda d: d.update(exception_types=['SECRET']),
+                   lambda d: d.update(exception_types=['TypeError', 'TypeError']),
+                   lambda d: d.update(exception_types=['TypeError', 'AnsibleError']),
+                   lambda d: d.update(components={'SECRET': True}),
+                   lambda d: d.update(errno_labels=[13]),
+                   lambda d: d.update(classification='EMPTY')]
+        for change in changes:
+            d = copy.deepcopy(base)
+            change(d)
+            with self.assertRaises((ValueError, TypeError)):
+                p.validate_diagnostics(d)
+        for d in (None, [], 'SECRET', {'classification': 'EMPTY'}):
+            with self.assertRaises(ValueError):
+                p.validate_diagnostics(d)
 
 
 class RuntimeTargetTests(unittest.TestCase):
@@ -268,6 +371,23 @@ class RuntimeControllerTests(unittest.TestCase):
             self.assertEqual((rc, calls), (3, 1))
             self.assertEqual(report['checkpoint'], 'playbook_result')
 
+    def test_exit_250_publishes_markers_and_never_raw_stderr(self):
+        rc, report, calls, _ = self.run_controller(result=subprocess.CompletedProcess(
+            [], 250, '', 'Traceback (most recent call last):\nTypeError: SECRET\n'))
+        self.assertEqual((rc, calls), (3, 1))
+        self.assertEqual(report['command']['returncode'], 250)
+        self.assertEqual(report['checkpoint'], 'playbook_result')
+        self.assertEqual(report['diagnostics']['exception_types'], ['TypeError'])
+        p.validate_diagnostics(report['diagnostics'])
+
+    def test_marker_matching_does_not_allow_warning_success(self):
+        result = subprocess.CompletedProcess([], 0, json.dumps(valid_report()['ansible']),
+                                             'TypeError: SECRET warning-like text')
+        rc, report, calls, _ = self.run_controller(result=result)
+        self.assertEqual((rc, calls), (3, 1))
+        self.assertEqual(report['status'], 'INCOMPLETE')
+        self.assertNotIn('ansible', report)
+
     def test_timeout_has_no_raw_command_output(self):
         rc, report, calls, _ = self.run_controller(fault='playbook_execute')
         self.assertEqual((rc, calls), (3, 1))
@@ -425,6 +545,30 @@ class RuntimeHostTests(unittest.TestCase):
         self.assertNotIn('SECRET', json.dumps(result))
         self.assertEqual(result['runtime_attempt']['command']['returncode'], 2)
         self.assertFalse(result['fixture_become_verified'])
+
+    def test_failure_diagnostics_survive_host_boundary_without_promoting_status(self):
+        d = p.stderr_diagnostics('PermissionError: [Errno 13] SECRET')
+        value = {'status': 'INCOMPLETE', 'stage': 'ansible_playbook',
+                 'checkpoint': 'playbook_result', 'diagnostics': d,
+                 'command': {'returncode': 250, 'stdout_bytes': 0, 'stderr_bytes': 2671}}
+        rc, result, cleans, _ = self.mocked_main(value, controller_rc=3)
+        self.assertEqual((rc, cleans), (3, 2))
+        self.assertEqual(result['runtime_attempt']['diagnostics'], d)
+        self.assertEqual(result['reason'], 'CONTROLLER_RUNTIME_UNCONFIRMED')
+        self.assertFalse(result['fixture_become_verified'])
+        self.assertFalse(result['phase1_complete'])
+
+    def test_invalid_diagnostics_are_rejected_and_cleanup_still_runs(self):
+        for d in ({'raw_stderr': 'SECRET'}, ['SECRET'], None,
+                  dict(p.stderr_diagnostics(''), exception_types=['SECRET'])):
+            value = {'status': 'INCOMPLETE', 'stage': 'ansible_playbook',
+                     'checkpoint': 'playbook_result', 'diagnostics': d}
+            rc, result, cleans, _ = self.mocked_main(value, controller_rc=3)
+            self.assertEqual((rc, cleans), (3, 2))
+            self.assertTrue(result['runtime_attempt']['diagnostics_rejected'])
+            self.assertNotIn('diagnostics', result['runtime_attempt'])
+            self.assertNotIn('SECRET', json.dumps(result))
+            self.assertTrue(result['cleanup_confirmed'])
 
     def test_checkpoint_is_allowlisted_and_never_promotes_incomplete(self):
         for checkpoint in ('controller_identity', 'collection_manifest', 'constants_import',
