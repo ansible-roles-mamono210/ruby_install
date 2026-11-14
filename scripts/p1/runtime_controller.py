@@ -73,8 +73,11 @@ def main():
                    ANSIBLE_LOCAL_TEMP='/tmp/ruby-p1-runtime-local',
                    ANSIBLE_NOCOLOR='1', NO_COLOR='1', PYTHONDONTWRITEBYTECODE='1',
                    ANSIBLE_STDOUT_CALLBACK='runtime_callback',
-                   ANSIBLE_CALLBACK_PLUGINS='/p1/callback_plugins', ANSIBLE_CALLBACKS_ENABLED='',
+                   ANSIBLE_CALLBACK_PLUGINS='/p1/callback_plugins',
                    ANSIBLE_LOG_PATH='/dev/null', ANSIBLE_FORCE_COLOR='0')
+        # In core 2.21.6 an empty string becomes [''], an invalid plugin name.
+        # Omit it and use Ansible's [] default with the private config below.
+        env.pop('ANSIBLE_CALLBACKS_ENABLED', None)
         # Use a known private config and inventory; do not load the checkout's cfg.
         checkpoint = 'workspace_create'
         with tempfile.TemporaryDirectory(prefix='ruby-p1-runtime-', dir='/tmp') as tmp:

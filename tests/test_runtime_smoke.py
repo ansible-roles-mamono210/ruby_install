@@ -1,6 +1,7 @@
 """Offline boundary, protocol, and failure tests; never contacts Docker/Ansible."""
 import contextlib
 import builtins
+import configparser
 import copy
 import importlib.util
 import io
@@ -347,7 +348,8 @@ class PayloadPermissionTests(unittest.TestCase):
 class RuntimeControllerTests(unittest.TestCase):
     """Exercise real control flow/files with fault injection, without Ansible."""
 
-    def run_controller(self, fault=None, paths=None, scan=True, result=None):
+    def run_controller(self, fault=None, paths=None, scan=True, result=None,
+                       inherited_callbacks=None):
         paths = ['/original/collections', '/usr/share/ansible/collections',
                  '/original/collections'] if paths is None else paths
         if result is None:
@@ -359,6 +361,8 @@ class RuntimeControllerTests(unittest.TestCase):
         args = h.controller_args('controller', 'target', 'run', '/tmp/dedicated', 123)
         launcher_env = dict(args[i + 1].split('=', 1) for i, arg in enumerate(args) if arg == '--env')
         launcher_env['HOME'] = '/home/circleci'
+        if inherited_callbacks is not None:
+            launcher_env['ANSIBLE_CALLBACKS_ENABLED'] = inherited_callbacks
 
         def imported(name, globals=None, locals=None, fromlist=(), level=0):
             if name == 'ansible' and 'constants' in fromlist:
@@ -442,6 +446,28 @@ class RuntimeControllerTests(unittest.TestCase):
         self.assertEqual(captured['env']['ANSIBLE_COLLECTIONS_SCAN_SYS_PATH'], 'false')
         self.assertEqual(captured['env']['ANSIBLE_HOME'], '/tmp/ruby-p1-runtime-home')
         self.assertEqual(captured['env']['ANSIBLE_LOCAL_TEMP'], '/tmp/ruby-p1-runtime-local')
+
+    def test_child_callback_selection_uses_default_empty_list_and_pinned_stdout(self):
+        rc, report, calls, captured = self.run_controller()
+        self.assertEqual((rc, calls), (0, 1))
+        p.validate_report(report)
+        # Ansible parses an empty environment string as [''], not an empty list.
+        self.assertNotIn('ANSIBLE_CALLBACKS_ENABLED', captured['env'])
+        cfg = configparser.ConfigParser()
+        cfg.read_string(captured['config'])
+        self.assertFalse(cfg.has_option('defaults', 'callbacks_enabled'))
+        self.assertEqual(captured['env']['ANSIBLE_STDOUT_CALLBACK'], 'runtime_callback')
+        self.assertEqual(captured['env']['ANSIBLE_CALLBACK_PLUGINS'], '/p1/callback_plugins')
+
+    def test_inherited_callback_settings_do_not_escape_into_child(self):
+        for value in ('', ' ', '[]', 'profile_tasks', 'SECRET_callback'):
+            with self.subTest(value=value):
+                rc, report, calls, captured = self.run_controller(inherited_callbacks=value)
+                self.assertEqual((rc, calls), (0, 1))
+                p.validate_report(report)
+                self.assertNotIn('ANSIBLE_CALLBACKS_ENABLED', captured['env'])
+                self.assertNotIn('SECRET', json.dumps(report))
+                # run_controller also asserts that the parent environment is unchanged.
 
     def test_missing_launcher_temp_reproduces_preflight_stop_in_stub(self):
         args = h.controller_args('controller', 'target', 'run', '/tmp/dedicated', 123)
