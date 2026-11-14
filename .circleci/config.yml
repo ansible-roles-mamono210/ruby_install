@@ -51,16 +51,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Audit verified Ruby source archives without extraction
-          no_output_timeout: 13m
+          name: Resolve Ruby build dependencies without installing packages
+          no_output_timeout: 17m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
-            timeout --signal=TERM --kill-after=30s 12m \
-              python3 scripts/p1/source_probe.py \
-              --allow-pull --ephemeral-ci --allow-source-download --allow-archive-audit \
+            timeout --signal=TERM --kill-after=30s 16m \
+              python3 scripts/p1/dependency_probe.py \
+              --allow-pull --ephemeral-ci --allow-repo-metadata --allow-solver \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e

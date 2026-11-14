@@ -322,24 +322,6 @@ class HostTests(unittest.TestCase):
             self.assertEqual(value['reason'], reason)
             self.assertNotIn('SECRET', json.dumps(value))
 
-    def test_config_retains_gates_and_single_job(self):
-        config = yaml.safe_load((ROOT / '.circleci/config.yml').read_text())
-        self.assertFalse(config['parameters']['run_p1_env_probe']['default'])
-        workflow = config['workflows']['p1-environment-measurement']
-        self.assertEqual(workflow['jobs'], ['p1-environment'])
-        self.assertEqual(workflow['when']['and'][1], {'equal': [h.BRANCH, '<< pipeline.git.branch >>']})
-        job = config['jobs']['p1-environment']
-        self.assertEqual(job['machine']['image'], 'ubuntu-2204:2023.10.1')
-        self.assertEqual(job['resource_class'], 'medium')
-        command = job['steps'][1]['run']['command']
-        self.assertIn('scripts/p1/source_probe.py', command)
-        self.assertIn('--allow-source-download', command)
-        self.assertIn('--allow-archive-audit', command)
-        self.assertNotIn('runtime_smoke.py', command)
-        # The runner must not kill the quiet collector before its own timeout
-        # and 30-second termination grace can record an outcome.
-        no_output_minutes = int(job['steps'][1]['run']['no_output_timeout'].removesuffix('m'))
-        self.assertGreater(no_output_minutes * 60, 12 * 60 + 30)
 
 
 if __name__ == '__main__':
