@@ -29,24 +29,35 @@ class Stop(Exception):
     pass
 
 
-def command(args, timeout=30, source=None, deadline=None):
+def command(args, timeout=30, source=None, deadline=None, diagnostic_label=None):
+    if diagnostic_label not in (None, 'IMAGE_INSPECT'):
+        raise Stop('INVALID_DIAGNOSTIC_LABEL')
+
+    def stop(code):
+        raise Stop((diagnostic_label + '_' if diagnostic_label else '') + code)
+
     if deadline is not None:
         timeout = min(timeout, deadline - time.monotonic())
     if timeout <= 0:
-        raise Stop('TIME_LIMIT')
+        stop('TIME_LIMIT')
     try:
         result = subprocess.run(args, input=source, text=True, capture_output=True,
                                 timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        raise Stop('COMMAND_TIMEOUT') from None
+        stop('COMMAND_TIMEOUT')
     except OSError:
-        raise Stop('COMMAND_UNAVAILABLE') from None
+        stop('COMMAND_UNAVAILABLE')
     if result.returncode:
-        raise Stop('COMMAND_EXIT_' + str(result.returncode))
+        if diagnostic_label:
+            # Persist a fixed category only; never return raw stderr or arguments.
+            category = ('TEMPLATE_ERROR' if result.stderr.lstrip().lower().startswith('template parsing error:')
+                        else 'OTHER_STDERR' if result.stderr else 'NO_STDERR')
+            stop(category + '_EXIT_' + str(result.returncode))
+        stop('COMMAND_EXIT_' + str(result.returncode))
     if result.stderr:
-        raise Stop('UNCLASSIFIED_STDERR')
+        stop('UNCLASSIFIED_STDERR')
     if len(result.stdout.encode('utf-8')) > 1024 * 1024:
-        raise Stop('OUTPUT_TOO_LARGE')
+        stop('OUTPUT_TOO_LARGE')
     return result.stdout
 
 
@@ -64,13 +75,28 @@ def inspect_image(deadline):
     # Do not request Env, labels, command/entrypoint text, or healthcheck text.
     fmt = ('{"id":{{json .Id}},"repo_digests":{{json .RepoDigests}},'
            '"os":{{json .Os}},"arch":{{json .Architecture}},'
-           '"volume_count":{{len .Config.Volumes}}}')
-    info = json.loads(command(DOCKER + ['image', 'inspect', '--format', fmt, TARGET],
-                              deadline=deadline))
+           '"volumes":{{json .Config.Volumes}}}')
+    raw = command(DOCKER + ['image', 'inspect', '--format', fmt, TARGET],
+                  deadline=deadline, diagnostic_label='IMAGE_INSPECT')
+    try:
+        info = json.loads(raw)
+    except (ValueError, TypeError):
+        raise Stop('IMAGE_INSPECT_INVALID_JSON') from None
+    if (not isinstance(info, dict)
+            or set(info) != {'id', 'repo_digests', 'os', 'arch', 'volumes'}):
+        raise Stop('IMAGE_INSPECT_INVALID_FIELDS')
+    # Volume paths exist only in this local response. Return only their count.
+    volumes = info.pop('volumes')
+    if volumes is not None and not isinstance(volumes, dict):
+        raise Stop('IMAGE_INSPECT_INVALID_VOLUMES')
+    info['volume_count'] = 0 if volumes is None else len(volumes)
     if info.get('id') != CONFIG or info.get('os') != 'linux' or info.get('arch') != 'amd64':
         raise Stop('IMAGE_IDENTITY_MISMATCH')
-    if type(info.get('volume_count')) is not int or info['volume_count'] != 0:
+    if info['volume_count'] != 0:
         raise Stop('IMAGE_VOLUME_DECLARATION')
+    if (not isinstance(info['repo_digests'], list) or not info['repo_digests']
+            or not all(isinstance(value, str) for value in info['repo_digests'])):
+        raise Stop('IMAGE_INSPECT_INVALID_REPO_DIGESTS')
     return info
 
 
@@ -137,7 +163,7 @@ def main(argv=None):
     parser.add_argument('--allow-pull', action='store_true')
     parser.add_argument('--ephemeral-ci', action='store_true')
     args = parser.parse_args(argv)
-    report = {'schema': 'ruby-p1-target-run-r9', 'status': 'INCOMPLETE',
+    report = {'schema': 'ruby-p1-target-run-r10', 'status': 'INCOMPLETE',
               'p1_02_complete': False, 'phase1_complete': False,
               'requested_ref': TARGET, 'stage': 'preflight',
               'scope': 'offline_import_and_configuration_only',
@@ -174,7 +200,7 @@ def main(argv=None):
             raise Stop('LOCAL_DOCKER_SOCKET_REQUIRED')
         inventory = load_inventory()
         run_id = uuid.uuid4().hex
-        name = 'ruby-p1-' + run_id + '-target-r9'
+        name = 'ruby-p1-' + run_id + '-target-r10'
         report.update(run_id=run_id, started_at=inventory.now())
         deadline = time.monotonic() + 600
         report['source_sha256'] = {
@@ -184,8 +210,9 @@ def main(argv=None):
         print('target: pull fixed digest', flush=True)
         command(DOCKER + ['pull', '--quiet', '--platform', 'linux/amd64', TARGET],
                 timeout=240, deadline=deadline)
-        report['stage'] = 'image_identity'
+        report['stage'] = 'image_inspect'
         info = inspect_image(deadline)
+        report['stage'] = 'registry_identity'
         registry = inventory.registry_identity(TARGET, info, deadline)
         if registry.get('platform_manifest_digest') != MANIFEST or registry.get('config_digest') != CONFIG:
             raise Stop('REGISTRY_BASELINE_MISMATCH')

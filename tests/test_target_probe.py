@@ -118,13 +118,61 @@ class TargetTests(unittest.TestCase):
         self.assertNotIn(':latest', ' '.join(args))
 
     def test_image_volume_and_identity_changes_stop(self):
-        base = {'id': p.CONFIG, 'os': 'linux', 'arch': 'amd64', 'volume_count': 0}
-        with patch.object(p, 'command', return_value=json.dumps(base)):
-            self.assertEqual(p.inspect_image(time.monotonic() + 10), base)
-        for update in ({'volume_count': 1}, {'volume_count': None}, {'id': 'changed'}, {'arch': 'arm64'}):
+        base = {'id': p.CONFIG, 'os': 'linux', 'arch': 'amd64',
+                'repo_digests': [p.TARGET], 'volumes': None}
+        for volumes in (None, {}):
+            with patch.object(p, 'command', return_value=json.dumps(dict(base, volumes=volumes))):
+                info = p.inspect_image(time.monotonic() + 10)
+                self.assertEqual(info['volume_count'], 0)
+                self.assertNotIn('volumes', info)
+        for update in ({'volumes': {'/PRIVATE_VOLUME_PATH': {}}},
+                       {'id': 'changed'}, {'arch': 'arm64'}):
             with patch.object(p, 'command', return_value=json.dumps(dict(base, **update))):
-                with self.assertRaises(p.Stop):
+                with self.assertRaises(p.Stop) as raised:
                     p.inspect_image(time.monotonic() + 10)
+                self.assertNotIn('PRIVATE_VOLUME_PATH', str(raised.exception))
+
+    def test_inspect_null_is_accepted_but_missing_and_wrong_types_are_not(self):
+        base = {'id': p.CONFIG, 'os': 'linux', 'arch': 'amd64',
+                'repo_digests': [p.TARGET], 'volumes': None}
+        cases = [([], 'IMAGE_INSPECT_INVALID_FIELDS'),
+                 ({k: v for k, v in base.items() if k != 'volumes'}, 'IMAGE_INSPECT_INVALID_FIELDS'),
+                 (dict(base, Env=['PRIVATE']), 'IMAGE_INSPECT_INVALID_FIELDS')]
+        cases += [(dict(base, volumes=value), 'IMAGE_INSPECT_INVALID_VOLUMES')
+                  for value in (False, True, 0, 1, '', 'PRIVATE', [])]
+        cases += [(dict(base, repo_digests=value), 'IMAGE_INSPECT_INVALID_REPO_DIGESTS')
+                  for value in (None, [], 'PRIVATE', [False])]
+        for value, expected in cases:
+            with self.subTest(value=value), patch.object(p, 'command', return_value=json.dumps(value)):
+                with self.assertRaises(p.Stop) as raised:
+                    p.inspect_image(time.monotonic() + 10)
+                self.assertEqual(str(raised.exception), expected)
+
+    def test_malformed_inspect_json_is_not_disclosed(self):
+        with patch.object(p, 'command', return_value='PRIVATE malformed response'):
+            with self.assertRaisesRegex(p.Stop, '^IMAGE_INSPECT_INVALID_JSON$'):
+                p.inspect_image(time.monotonic() + 10)
+
+    def test_inspect_error_categories_are_fixed_and_do_not_expose_stderr(self):
+        cases = [('template parsing error: PRIVATE', 'TEMPLATE_ERROR'),
+                 ('  Template parsing error: PRIVATE', 'TEMPLATE_ERROR'),
+                 ('Error response from daemon: PRIVATE', 'OTHER_STDERR'),
+                 ('', 'NO_STDERR')]
+        for stderr, category in cases:
+            response = SimpleNamespace(returncode=1, stdout='PRIVATE', stderr=stderr)
+            with self.subTest(category=category), patch.object(p.subprocess, 'run', return_value=response):
+                with self.assertRaises(p.Stop) as raised:
+                    p.inspect_image(time.monotonic() + 10)
+                self.assertEqual(str(raised.exception), 'IMAGE_INSPECT_' + category + '_EXIT_1')
+
+    def test_inspect_timeout_and_stderr_success_still_stop(self):
+        with patch.object(p.subprocess, 'run', side_effect=subprocess.TimeoutExpired('PRIVATE', 1)):
+            with self.assertRaisesRegex(p.Stop, '^IMAGE_INSPECT_COMMAND_TIMEOUT$'):
+                p.inspect_image(time.monotonic() + 10)
+        response = SimpleNamespace(returncode=0, stdout='{}', stderr='PRIVATE warning')
+        with patch.object(p.subprocess, 'run', return_value=response):
+            with self.assertRaisesRegex(p.Stop, '^IMAGE_INSPECT_UNCLASSIFIED_STDERR$'):
+                p.inspect_image(time.monotonic() + 10)
 
     def test_command_failures_and_stderr_do_not_disclose_output(self):
         for result in (SimpleNamespace(returncode=1, stdout='SECRET', stderr='SECRET'),
@@ -161,7 +209,7 @@ class TargetTests(unittest.TestCase):
             self.assertEqual(p.main(['--output', str(out)]), 3)
             self.assertEqual(out.read_text(), 'KEEP')
 
-    def run_main(self, cleanup=True, bad_manifest=False, failed_probe=False):
+    def run_main(self, cleanup=True, bad_manifest=False, failed_probe=False, inspect_error=None):
         registry = {'platform_manifest_digest': 'changed' if bad_manifest else p.MANIFEST,
                     'config_digest': p.CONFIG, 'registry_reference': p.TARGET}
         inventory = SimpleNamespace(now=lambda: 'fixture-time',
@@ -176,7 +224,7 @@ class TargetTests(unittest.TestCase):
                 patch.object(p.platform, 'machine', return_value='x86_64'), \
                 patch.object(p.os, 'stat', return_value=SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=0)), \
                 patch.object(p, 'load_inventory', return_value=inventory), \
-                patch.object(p, 'inspect_image', return_value={'volume_count': 0}), \
+                patch.object(p, 'inspect_image', return_value={'volume_count': 0}, side_effect=inspect_error), \
                 patch.object(p, 'command', side_effect=['', json.dumps(probe)]) as run, \
                 patch.object(p, 'cleanup', return_value=cleanup) as clean, \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -205,6 +253,17 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(clean, 0)
         self.assertTrue(result['container_not_started'])
+        self.assertEqual(result['stage'], 'registry_identity')
+
+    def test_inspect_failure_has_its_own_stage_and_does_not_start_container(self):
+        rc, result, calls, clean = self.run_main(inspect_error=p.Stop('IMAGE_INSPECT_TEMPLATE_ERROR_EXIT_1'))
+        self.assertEqual(rc, 3)
+        self.assertEqual(result['stage'], 'image_inspect')
+        self.assertEqual(result['reason'], 'IMAGE_INSPECT_TEMPLATE_ERROR_EXIT_1')
+        self.assertTrue(result['container_not_started'])
+        self.assertIsNone(result['cleanup_confirmed'])
+        self.assertEqual(calls, 1)
+        self.assertEqual(clean, 0)
 
     def test_failed_import_is_retained_without_pass(self):
         rc, result, _, clean = self.run_main(failed_probe=True)
