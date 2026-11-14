@@ -30,6 +30,11 @@ DIAGNOSTIC_IMAGES = {
 }
 CANDIDATE_CONTROLLER = 'ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41'
 CANDIDATE_CONFIG_DIGEST = 'sha256:d406bc5afa3a8e24a8893f9e76766cf9648db1b1373ed9e6fcf82a1fadabea83'
+# Narrow inventory-only policy, based on the retained CI 378 evidence. A new
+# image, warning shape, or collection inventory requires a separate review.
+KNOWN_COLLECTION_WARNING_POLICY = 'ruby-p1-protomatter-ci378-r8'
+KNOWN_COLLECTION_INVENTORY_SHA256 = 'f268910fc2e25313ebd22fa56273a8ce22bc3bcc098478f53fc80645e04b3600'
+KNOWN_WARNING_STATUS = 'CONTROLLER_OFFLINE_CHECKS_PASSED_KNOWN_WARNING_ONLY'
 DIGEST = re.compile(r'^sha256:[0-9a-f]{64}$')
 DOCKER = ['docker', '--host', 'unix:///var/run/docker.sock']
 
@@ -283,6 +288,60 @@ def candidate_summary(row):
         return 'INCOMPLETE', 3
 
 
+def known_collection_warning(row):
+    """Recognize one retained warning in the exact reviewed inventory context.
+
+    This does not change the probe, hide stderr, or approve use of the internal
+    collection. Call only after the normal completeness and failure checks.
+    """
+    try:
+        if (row['requested_ref'] != CANDIDATE_CONTROLLER
+                or row['galaxy_cache_mode'] != 'tmp'
+                or row['image'] != {
+                    'id': CANDIDATE_CONFIG_DIGEST,
+                    'repo_digests': [CANDIDATE_CONTROLLER],
+                    'os': 'linux', 'arch': 'amd64', 'user': 'circleci'}
+                or row['registry'] != {
+                    'registry_reference': CANDIDATE_CONTROLLER,
+                    'index_digest': None,
+                    'platform_manifest_digest': CANDIDATE_CONTROLLER.split('@')[1],
+                    'config_digest': CANDIDATE_CONFIG_DIGEST}):
+            return False
+        probe = row['probe']
+        if (probe['packages']['ansible-core'] != '2.21.6'
+                or probe['python'] != '3.14.10'
+                or type(probe['uid']) is not int or probe['uid'] != 1000):
+            return False
+        diagnostic = probe['collections_diagnostic']
+        if (diagnostic['environment_mode'] != 'ISOLATED_HOME_SEARCH_PRESERVED'
+                or diagnostic['stderr_review_required'] is not True
+                or diagnostic['stderr_hints'] != []
+                or diagnostic['stderr_path_classes'] != []
+                or type(diagnostic['stderr_bytes']) is not int
+                or diagnostic['stderr_bytes'] != 219):
+            return False
+        expected = {
+            'schema': 'ruby-p1-collection-warning-r7', 'state': 'FULLY_CLASSIFIED',
+            'matched_records': 1, 'matched_bytes': 219, 'unclassified_bytes': 0,
+            'message_counts': {'COLLECTION_METADATA_MISSING': 1},
+            'expected_internal_protomatter_records': 1,
+        }
+        # JSON comparison distinguishes boolean/float counters from integers.
+        if json.dumps(diagnostic['stderr_identity'], sort_keys=True) != json.dumps(expected, sort_keys=True):
+            return False
+        collections = probe['collections']
+        if len(collections) != 95 or any(
+                not isinstance(entry, dict) or set(entry) != {'name', 'version', 'location'}
+                or any(type(value) is not str for value in entry.values())
+                for entry in collections):
+            return False
+        encoded = json.dumps(collections, ensure_ascii=True, sort_keys=True,
+                             separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(encoded).hexdigest() == KNOWN_COLLECTION_INVENTORY_SHA256
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return False
+
+
 def controller_checks_summary(row):
     """Check evidence completeness, then failures, then unresolved warnings."""
     status, code = candidate_summary(row)
@@ -318,6 +377,9 @@ def controller_checks_summary(row):
         if count != 1:
             return 'CONTROLLER_CHECKS_FAILED', 5
         if any(c['stderr_bytes'] for c in observations):
+            if (all(c['stderr_bytes'] == 0 for c in observations[:-1])
+                    and known_collection_warning(row)):
+                return KNOWN_WARNING_STATUS, 0
             return 'CONTROLLER_CHECKS_WARNING_REVIEW', 6
         return 'CONTROLLER_OFFLINE_CHECKS_PASSED_ONLY', 0
     except (KeyError, TypeError, AttributeError):
@@ -388,6 +450,14 @@ def main(argv=None):
                 summarize = controller_checks_summary if args.mode == 'controller-checks' else candidate_summary
                 report['status'], exit_code = summarize(report['images']['controller'])
                 if args.mode == 'controller-checks':
+                    if report['status'] == KNOWN_WARNING_STATUS:
+                        report['warning_policy'] = {
+                            'id': KNOWN_COLLECTION_WARNING_POLICY,
+                            'disposition': 'KNOWN_WARNING_RETAINED',
+                            'scope': 'controller_collection_list_only',
+                            'collection_inventory_sha256': KNOWN_COLLECTION_INVENTORY_SHA256,
+                            'evidence': 'images.controller.probe.collections_diagnostic',
+                        }
                     report['remaining'] += ['controller_warning_review', 'full_molecule_target_runtime']
                     if exit_code in (0, 6):
                         report['remaining'].remove('candidate_pip_check')
