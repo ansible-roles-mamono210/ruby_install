@@ -17,7 +17,7 @@ SUCCESS = 'DEPENDENCY_SOLVER_MEASURED'
 PACKAGES = ('gcc', 'make', 'tar', 'gzip', 'ca-certificates', 'openssl-devel',
             'libyaml-devel', 'zlib-devel', 'libffi-devel')
 REPOS = ('baseos', 'appstream', 'crb')
-SCHEMA = 'ruby-p1-dependency-container-r25'
+SCHEMA = 'ruby-p1-dependency-container-r26'
 MAX_ROWS = 256
 TOKEN = re.compile(r'[A-Za-z0-9_+.~:^@-]{1,160}\Z')
 FAILURE_REASONS = frozenset({
@@ -26,10 +26,11 @@ FAILURE_REASONS = frozenset({
     'REPOSITORY_VERIFICATION_DISABLED', 'REPOSITORY_CREDENTIAL_OR_PROXY_PRESENT',
     'REPOSITORY_URL_SCHEME', 'REPOSITORY_BASELINE_MISMATCH', 'SYSTEM_STATE_CHANGED',
     'CONTAINER_IDENTITY_MISMATCH', 'WORKER_TIME_LIMIT', 'DNF_VERSION_UNSUPPORTED',
-    'DEPENDENCY_API_OR_METADATA_ERROR', 'DNF_TEMP_ROOT_UNEXPECTED'})
+    'DEPENDENCY_API_OR_METADATA_ERROR', 'DNF_TEMP_ROOT_UNEXPECTED',
+    'DNF_SUBSTITUTION_MISMATCH', 'REPOSITORY_UNEXPANDED_VARIABLE'})
 STAGES = frozenset({'identity', 'silence_setup', 'dnf_import', 'rpm_import', 'dnf_version',
     'workspace_create', 'rpm_before', 'configuration_before', 'condition_workspace',
-    'temporary_root', 'base_open', 'configuration_read', 'transport_check', 'cache_directories',
+    'temporary_root', 'base_open', 'configuration_read', 'transport_check', 'variable_read', 'cache_directories',
     'repository_read', 'repository_baseline', 'repository_transport', 'metadata_load',
     'candidate_query', 'package_mark', 'solver', 'transaction_summary', 'base_close',
     'rpm_after', 'configuration_after', 'state_compare', 'result_versions',
@@ -81,6 +82,35 @@ MESSAGE_SIGNALS = frozenset(CURL_SIGNALS.values()) | frozenset(FS_SIGNALS.values
     'HTTP_5XX', 'HTTP_OTHER', 'CACHE_ONLY', 'BASEURL_MISSING', 'MIRRORS_EXHAUSTED',
     'CHECKSUM_MISMATCH'}
 VERSION_PATTERN = re.compile(r'[0-9]{1,3}(?:\.[0-9]{1,3}){1,3}\Z')
+SUBSTITUTION_EXPECTED = {'releasever': '9', 'arch': 'x86_64',
+                         'basearch': 'x86_64', 'stream': '9-stream'}
+
+
+def empty_substitutions():
+    return {'state': 'NOT_STARTED',
+            'before': dict.fromkeys(SUBSTITUTION_EXPECTED, 'UNKNOWN'),
+            'after': dict.fromkeys(SUBSTITUTION_EXPECTED, 'UNKNOWN')}
+
+
+def substitution_codes(values):
+    # Only these four fixed-image expectations may be disclosed, never arbitrary values.
+    return {key: ('MISSING' if key not in values else 'EXPECTED'
+                  if type(values[key]) is str and values[key] == expected else 'OTHER')
+            for key, expected in SUBSTITUTION_EXPECTED.items()}
+
+
+def load_substitutions(conf, trace=None):
+    observation = empty_substitutions()
+    if trace is not None:
+        trace['substitutions'] = observation
+    observation.update(state='STARTED', before=substitution_codes(conf.substitutions))
+    # Conf.read() does not load varsdir. Do this before RepoReader substitutes URLs.
+    # Use the image's installroot and configured varsdir; never hardcode stream values.
+    conf.substitutions.update_from_etc(conf.installroot, varsdir=conf.varsdir)
+    observation.update(state='LOADED', after=substitution_codes(conf.substitutions))
+    if any(code != 'EXPECTED' for code in observation['after'].values()):
+        raise Stop('DNF_SUBSTITUTION_MISMATCH')
+    return observation
 
 
 def version_code(value):
@@ -281,7 +311,7 @@ def configuration_state():
     return {'count': len(values), 'sha256': digest(values)}
 
 
-def check_transport(conf):
+def check_transport(conf, require_expanded=False):
     # Preserve the image's transports, but do not accept TLS bypass or credentials.
     if not conf.sslverify or not conf.gpgcheck:
         raise Stop('REPOSITORY_VERIFICATION_DISABLED')
@@ -297,6 +327,8 @@ def check_transport(conf):
                 raise Stop('REPOSITORY_CREDENTIAL_OR_PROXY_PRESENT')
             if parsed.scheme not in ('http', 'https') or not parsed.hostname:
                 raise Stop('REPOSITORY_URL_SCHEME')
+            if require_expanded and ('$' in value or '%24' in value.lower()):
+                raise Stop('REPOSITORY_UNEXPANDED_VARIABLE')
 
 
 def configure(base, directory, crb, trace=None):
@@ -304,6 +336,8 @@ def configure(base, directory, crb, trace=None):
     base.conf.read()
     mark(trace, 'transport_check')
     check_transport(base.conf)
+    mark(trace, 'variable_read')
+    substitutions = load_substitutions(base.conf, trace)
     base.conf.plugins = False
     base.conf.cacheonly = False
     mark(trace, 'cache_directories')
@@ -322,12 +356,12 @@ def configure(base, directory, crb, trace=None):
         repo.disable()
         if repo.id in selected:
             mark(trace, 'repository_transport')
-            check_transport(repo)
+            check_transport(repo, require_expanded=True)
             repo.skip_if_unavailable = False
             repo.timeout = 20
             repo.retries = 1
             repo.enable()
-    return baseline, list(selected)
+    return baseline, list(selected), substitutions
 
 
 @contextlib.contextmanager
@@ -352,10 +386,11 @@ def temporary_root(dnf, directory, trace=None):
 def condition(dnf, directory, crb, trace=None):
     start = time.monotonic()
     with temporary_root(dnf, directory, trace), dnf.Base() as base:
-        baseline, enabled = configure(base, directory, crb, trace)
+        baseline, enabled, substitutions = configure(base, directory, crb, trace)
         mark(trace, 'metadata_load')
         base.fill_sack(load_system_repo=True, load_available_repos=True)
         result = {'crb': crb, 'baseline_enabled_repos': baseline, 'enabled_repos': enabled,
+                  'substitutions': substitutions,
                   'candidates': [], 'missing': [], 'resolution': 'NOT_ATTEMPTED',
                   'install_set': [], 'remove_set': [], 'planned_replacements': []}
         for name in PACKAGES:
@@ -417,6 +452,7 @@ def measure(dnf, rpm, directory, trace=None):
         for crb in (False, True):
             if trace is not None:
                 trace.update(condition='crb_on' if crb else 'crb_off', package='none')
+                trace['substitutions'] = empty_substitutions()
             mark(trace, 'condition_workspace')
             work = Path(directory) / ('crb-on' if crb else 'crb-off')
             work.mkdir()
@@ -520,7 +556,8 @@ def main():
         if alarm_set:
             signal.alarm(0)
     if result['status'] != SUCCESS:
-        result['diagnostic'] = dict(trace['failure'], state_check=trace['state_check'], versions=versions)
+        result['diagnostic'] = dict(trace['failure'], state_check=trace['state_check'], versions=versions,
+                                   substitutions=trace.get('substitutions', empty_substitutions()))
     print(json.dumps(result, sort_keys=True))
     return 0 if result['status'] == SUCCESS else 3
 

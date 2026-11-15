@@ -35,9 +35,17 @@ def pkg(name='gcc', repo='baseos'):
     return SimpleNamespace(name=name, epoch=0, version='1.2.3', release='1.el9', arch='x86_64', reponame=repo)
 
 
+class Substitutions(dict):
+    def __init__(self):
+        super().__init__(releasever='9', arch='x86_64', basearch='x86_64')
+        self.update_from_etc = Mock(side_effect=lambda *a, **kw: self.update(stream='9-stream'))
+
+
 def configuration(**changes):
     result = SimpleNamespace(read=Mock(), sslverify=True, gpgcheck=True, proxy='',
-                             baseurl=[], metalink='', mirrorlist='')
+                             baseurl=[], metalink='', mirrorlist='', installroot='/',
+                             varsdir=['/etc/yum/vars/', '/etc/dnf/vars/'],
+                             substitutions=Substitutions())
     for key, value in changes.items():
         setattr(result, key, value)
     return result
@@ -138,7 +146,8 @@ def failure_report():
                 'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'exception_kind': 'OS_ERROR',
                 'errno': 'EROFS', 'state_check': 'MATCH',
                 'error_chain': w.error_chain(OSError(errno.EROFS, 'SECRET')),
-                'versions': {'dnf': '4.14.0', 'rpm': '4.16.1.3'}}}
+                'versions': {'dnf': '4.14.0', 'rpm': '4.16.1.3'},
+                'substitutions': w.empty_substitutions()}}
 
 
 def raised_in(module, name, error, inner=None):
@@ -657,6 +666,139 @@ class DiagnosticTests(unittest.TestCase):
             self.assertNotIn('SECRET', json.dumps(h.failure_summary(value, w)))
 
 
+class SubstitutionTests(unittest.TestCase):
+    def test_configured_root_and_varsdir_loaded_before_repositories(self):
+        base, order = Base(), []
+        def read_conf():
+            order.append('config')
+            base.conf.installroot = '/configured-root'
+            base.conf.varsdir = ['/configured-vars']
+        def load_vars(root, *, varsdir):
+            order.append('variables')
+            self.assertEqual((root, varsdir), ('/configured-root', ['/configured-vars']))
+            base.conf.substitutions['stream'] = '9-stream'
+        def read_repos():
+            order.append('repositories')
+            self.assertEqual(base.conf.substitutions['stream'], '9-stream')
+        base.conf.read.side_effect = read_conf
+        base.conf.substitutions.update_from_etc.side_effect = load_vars
+        base.read_all_repos.side_effect = read_repos
+        row = measured_condition(False, base)
+        self.assertEqual(order, ['config', 'variables', 'repositories'])
+        self.assertEqual(row['substitutions']['before']['stream'], 'MISSING')
+        self.assertEqual(row['substitutions']['after']['stream'], 'EXPECTED')
+        self.assertTrue(h.valid_substitutions(row['substitutions'], w, success=True))
+
+    def test_already_loaded_value_and_other_substitutions_are_preserved(self):
+        conf = configuration()
+        conf.substitutions.update(stream='9-stream', unrelated='SECRET')
+        value = w.load_substitutions(conf)
+        self.assertTrue(all(v == 'EXPECTED' for v in value['before'].values()))
+        self.assertEqual(conf.substitutions['unrelated'], 'SECRET')
+        self.assertNotIn('SECRET', json.dumps(value))
+        self.assertNotIn('unrelated', json.dumps(value))
+
+    def test_missing_stream_is_not_hardcoded_and_stops_before_repository_read(self):
+        base, trace = Base(), trace_state()
+        base.conf.substitutions.update_from_etc.side_effect = None
+        base.fill_sack = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(w.Stop, '^DNF_SUBSTITUTION_MISMATCH$'):
+                w.condition(fake_dnf(base), directory, False, trace)
+            self.assertFalse((Path(directory) / 'cachedir').exists())
+        self.assertEqual(trace['substitutions']['after']['stream'], 'MISSING')
+        self.assertEqual(trace['stage'], 'variable_read')
+        base.read_all_repos.assert_not_called()
+        base.fill_sack.assert_not_called()
+
+    def test_unexpected_release_arch_and_stream_values_stop_without_disclosure(self):
+        for key in w.SUBSTITUTION_EXPECTED:
+            for bad in ('SECRET', '', None, True, 9, ['SECRET']):
+                conf = configuration()
+                conf.substitutions.update(w.SUBSTITUTION_EXPECTED)
+                conf.substitutions[key] = bad
+                conf.substitutions.update_from_etc.side_effect = None
+                trace = trace_state()
+                with self.assertRaisesRegex(w.Stop, '^DNF_SUBSTITUTION_MISMATCH$'):
+                    w.load_substitutions(conf, trace)
+                self.assertEqual(trace['substitutions']['after'][key], 'OTHER')
+                self.assertNotIn('SECRET', json.dumps(trace))
+
+    def test_variable_load_failure_retains_started_state(self):
+        base, trace = Base(), trace_state()
+        base.conf.substitutions.update_from_etc.side_effect = PermissionError('SECRET')
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(PermissionError):
+            w.configure(base, directory, False, trace)
+        self.assertEqual(trace['substitutions']['state'], 'STARTED')
+        self.assertTrue(all(v == 'UNKNOWN' for v in trace['substitutions']['after'].values()))
+        self.assertTrue(h.valid_substitutions(trace['substitutions'], w))
+        self.assertNotIn('SECRET', json.dumps(trace))
+        base.read_all_repos.assert_not_called()
+
+    def test_repository_unexpanded_variables_stop_before_metadata(self):
+        for key, value in [('metalink', 'https://example.invalid/?r=$stream'),
+                           ('mirrorlist', 'https://example.invalid/${basearch}'),
+                           ('baseurl', ['https://example.invalid/%24stream'])]:
+            base = Base()
+            setattr(base.repos['baseos'], key, value)
+            base.fill_sack = Mock()
+            with self.assertRaisesRegex(w.Stop, '^REPOSITORY_UNEXPANDED_VARIABLE$'):
+                measured_condition(False, base)
+            base.fill_sack.assert_not_called()
+
+    def test_unselected_repository_url_is_not_required_to_expand(self):
+        base = Base()
+        base.repos['extras-common'].metalink = 'https://example.invalid/$unrelated'
+        self.assertEqual(measured_condition(False, base)['resolution'], 'MISSING_CANDIDATES')
+
+    def test_initial_not_started_evidence_cannot_authorize_success(self):
+        value = w.empty_substitutions()
+        self.assertTrue(h.valid_substitutions(value, w))
+        self.assertFalse(h.valid_substitutions(value, w, success=True))
+
+    def test_host_rejects_extra_keys_wrong_types_and_inconsistent_states(self):
+        good = w.load_substitutions(configuration())
+        mutations = [lambda v: v.update(extra='SECRET'),
+                     lambda v: v.update(state='SECRET'),
+                     lambda v: v.update(state=True),
+                     lambda v: v.update(before=[]),
+                     lambda v: v['after'].update(stream='SECRET'),
+                     lambda v: v['after'].update(stream=True),
+                     lambda v: v['after'].update(extra='SECRET'),
+                     lambda v: v['after'].pop('stream'),
+                     lambda v: v['after'].update(stream='UNKNOWN'),
+                     lambda v: v.update(state='NOT_STARTED'),
+                     lambda v: v.update(state='STARTED')]
+        for mutate in mutations:
+            value = copy.deepcopy(good)
+            mutate(value)
+            self.assertFalse(h.valid_substitutions(value, w))
+            payload = failure_report()
+            payload['diagnostic']['substitutions'] = value
+            result = h.failure_summary(json.dumps(payload), w)
+            self.assertEqual(result, {'state': 'INVALID_SCHEMA'})
+
+    def test_host_rejects_success_with_missing_or_unexpected_substitution(self):
+        for code in ('MISSING', 'OTHER'):
+            value = report()
+            value['conditions'][0]['substitutions']['after']['stream'] = code
+            with self.assertRaises(h.Stop):
+                h.validate(value, w)
+
+    def test_failure_evidence_is_retained_without_becoming_success(self):
+        payload = failure_report()
+        payload['diagnostic']['substitutions'] = w.load_substitutions(configuration())
+        value = h.failure_summary(json.dumps(payload), w)
+        self.assertEqual(value['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertEqual(value['diagnostic']['substitutions'], payload['diagnostic']['substitutions'])
+
+    def test_both_conditions_capture_their_own_initial_substitutions(self):
+        states = [measured_condition(crb)['substitutions'] for crb in (False, True)]
+        for state in states:
+            self.assertEqual(state['before']['stream'], 'MISSING')
+            self.assertEqual(state['after']['stream'], 'EXPECTED')
+
+
 class WorkerTests(unittest.TestCase):
     def test_crb_off_missing_candidate_does_not_solve(self):
         base = Base()
@@ -680,7 +822,7 @@ class WorkerTests(unittest.TestCase):
     def test_baseline_and_process_only_repo_flags(self):
         base = Base()
         with tempfile.TemporaryDirectory() as directory:
-            baseline, selected = w.configure(base, directory, False)
+            baseline, selected, substitutions = w.configure(base, directory, False)
             self.assertEqual(baseline, ['appstream', 'baseos', 'extras-common'])
             self.assertEqual(selected, ['baseos', 'appstream'])
             self.assertFalse(base.repos['crb'].enabled)

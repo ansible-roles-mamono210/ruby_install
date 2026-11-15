@@ -89,7 +89,8 @@ def validate_packages(values, worker, allowed_repos, maximum=256):
 
 def validate_condition(item, crb, worker):
     keys = {'crb', 'baseline_enabled_repos', 'enabled_repos', 'candidates', 'missing',
-            'resolution', 'install_set', 'remove_set', 'planned_replacements', 'elapsed_seconds'}
+            'resolution', 'install_set', 'remove_set', 'planned_replacements', 'elapsed_seconds',
+            'substitutions'}
     enabled = list(worker.REPOS if crb else worker.REPOS[:2])
     if (type(item) is not dict or set(item) != keys or item['crb'] is not crb
             or item['enabled_repos'] != enabled
@@ -98,6 +99,7 @@ def validate_condition(item, crb, worker):
             or any(type(n) is not str or not worker.TOKEN.fullmatch(n) for n in item['baseline_enabled_repos'])
             or 'crb' in item['baseline_enabled_repos']
             or item['resolution'] not in ('RESOLVED', 'MISSING_CANDIDATES', 'MARKING_FAILED', 'DEPSOLVE_FAILED')
+            or not valid_substitutions(item['substitutions'], worker, success=True)
             or type(item['elapsed_seconds']) not in (int, float)
             or not math.isfinite(item['elapsed_seconds']) or not 0 <= item['elapsed_seconds'] <= 540
             or type(item['candidates']) is not list or len(item['candidates']) != len(worker.PACKAGES)):
@@ -120,6 +122,22 @@ def validate_condition(item, crb, worker):
     if (item['planned_replacements'] != replacements
             or (item['resolution'] != 'RESOLVED' and (item['install_set'] or item['remove_set']))):
         raise Stop('WORKER_SCHEMA')
+
+
+def valid_substitutions(value, worker, success=False):
+    if (type(value) is not dict or set(value) != {'state', 'before', 'after'}
+            or type(value['state']) is not str
+            or value['state'] not in ('NOT_STARTED', 'STARTED', 'LOADED')):
+        return False
+    for phase in ('before', 'after'):
+        codes = value[phase]
+        unknown = value['state'] == 'NOT_STARTED' or (phase == 'after' and value['state'] == 'STARTED')
+        allowed = ('UNKNOWN',) if unknown else ('EXPECTED', 'MISSING', 'OTHER')
+        if (type(codes) is not dict or set(codes) != set(worker.SUBSTITUTION_EXPECTED)
+                or any(type(v) is not str or v not in allowed for v in codes.values())):
+            return False
+    return not success or (value['state'] == 'LOADED'
+                           and all(v == 'EXPECTED' for v in value['after'].values()))
 
 
 def valid_message(value, kind, worker):
@@ -188,10 +206,11 @@ def failure_summary(stdout, worker):
                'exception_kind': worker.EXCEPTION_KINDS,
                'errno': ('NONE', 'OTHER', *worker.ERRNO_CODES.values()),
                'state_check': worker.STATE_CHECKS}
-    if (type(detail) is not dict or set(detail) != set(allowed) | {'error_chain', 'versions'}
+    if (type(detail) is not dict or set(detail) != set(allowed) | {'error_chain', 'versions', 'substitutions'}
             or any(type(detail[key]) is not str or detail[key] not in values
                    for key, values in allowed.items())
             or not valid_error_chain(detail['error_chain'], worker)
+            or not valid_substitutions(detail['substitutions'], worker)
             or type(detail['versions']) is not dict or set(detail['versions']) != {'dnf', 'rpm'}
             or any(type(v) is not str or (v != 'UNKNOWN' and not worker.VERSION_PATTERN.fullmatch(v))
                    for v in detail['versions'].values())):
@@ -199,7 +218,7 @@ def failure_summary(stdout, worker):
     return {'state': 'VALIDATED_FAILURE_ONLY', 'reason': value['reason'],
             'worker_stage': value['stage'],
             'diagnostic': dict({k: detail[k] for k in allowed}, error_chain=detail['error_chain'],
-                               versions=detail['versions'])}
+                               versions=detail['versions'], substitutions=detail['substitutions'])}
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
@@ -217,12 +236,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-dependency-run-r25', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-dependency-run-r26', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-dependency-r25'
+    name = 'ruby-p1-' + run_id + '-dependency-r26'
     handlers = {}
     try:
         def interrupted(_signum, _frame):
