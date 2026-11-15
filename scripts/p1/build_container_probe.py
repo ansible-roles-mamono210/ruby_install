@@ -16,16 +16,16 @@ import tarfile
 import tempfile
 import time
 
-SCHEMA = 'ruby-p1-build-container-r29'
-SUCCESS = 'RUBY_3412_DOCS_ON_BUILD_VERIFIED'
+SCHEMA = 'ruby-p1-build-container-r30'
+SUCCESS = 'RUBY_3412_DOCS_OFF_CUSTOM_PREFIX_BUILD_VERIFIED'
 VERSION = '3.4.12'
-PREFIX = '/opt/ruby'
+PREFIX = '/opt/ruby-3.4.12-docs-off'
 SOURCE_SHA = '5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479'
 COMMANDS = ('ruby', 'gem', 'bundle', 'bundler', 'irb', 'erb', 'rdoc', 'ri', 'rake')
-CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby',
+CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby-3.4.12-docs-off',
              '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-rjit',
-             '--enable-install-doc', '--enable-install-rdoc', '--disable-install-capi')
-UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r29'
+             '--disable-install-doc', '--disable-install-capi')
+UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r30'
 MIN_FREE = 8 * 1024 ** 3
 MAX_LOG = 64 * 1024 ** 2
 TAIL_BYTES = 16384
@@ -59,7 +59,7 @@ def mount_for(path, text):
 
 
 def preflight():
-    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r29' and os.getuid() == 0
+    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r30' and os.getuid() == 0
          and platform.system() == 'Linux' and platform.machine() == 'x86_64'
          and platform.python_version() == '3.9.19' and Path('/.dockerenv').is_file(), 'IDENTITY')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
@@ -72,6 +72,7 @@ def preflight():
     need(not any(v and (k in forbidden or k.lower().endswith('_proxy'))
                  for k, v in os.environ.items()), 'ENVIRONMENT_OVERRIDE')
     need(not os.path.lexists(PREFIX), 'PREFIX_EXISTS')
+    need(not os.path.lexists('/opt/ruby'), 'DEFAULT_PREFIX_EXISTS')
     parent = Path('/tmp')
     need(parent.is_dir() and not parent.is_symlink() and os.access(parent, os.W_OK | os.X_OK),
          'WORKSPACE_PARENT')
@@ -109,7 +110,7 @@ def download(source, directory, row):
     path = Path(directory) / 'source.tar.gz'
     try:
         connection.request('GET', fixed[1], headers={'Accept-Encoding': 'identity',
-                           'User-Agent': 'ruby-p1-build-measurement-r29'})
+                           'User-Agent': 'ruby-p1-build-measurement-r30'})
         response = connection.getresponse()
         row['http_status'] = response.status
         need(response.status == 200, 'SOURCE_HTTP_STATUS_OR_REDIRECT')
@@ -274,18 +275,22 @@ def run(name, argv, cwd, directory, report, meter, timeout, end, require_success
 def build_settings(directory, configure_log):
     text = (directory / 'Makefile').read_text()
     values = {}
-    for key in ('prefix', 'ENABLE_SHARED', 'YJIT_SUPPORT', 'RJIT_SUPPORT', 'DOCTARGETS'):
+    for key in ('prefix', 'ENABLE_SHARED', 'YJIT_SUPPORT', 'RJIT_SUPPORT', 'DOCTARGETS',
+                'INSTALLDOC', 'EXTOUT'):
         match = re.search(r'^' + key + r'\s*=\s*([^\n]*)$', text, re.M)
         need(match is not None, 'BUILD_SETTING_MISSING')
         values[key] = match[1].strip()
     need(values == {'prefix': PREFIX, 'ENABLE_SHARED': 'yes', 'YJIT_SUPPORT': 'no',
-                    'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc'}, 'BUILD_SETTING_MISMATCH')
+                    'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'nodoc nodoc',
+                    'INSTALLDOC': 'nodoc', 'EXTOUT': '.ext'}, 'BUILD_SETTING_MISMATCH')
     headers = list(directory.glob('.ext/include/*/ruby/config.h'))
     need(len(headers) == 1, 'BUILD_CONFIG_HEADER')
     header = headers[0].read_text()
     for name in ('USE_YJIT', 'USE_RJIT'):
         need(re.search(r'^#define ' + name + r'\s+0\s*$', header, re.M) is not None, 'JIT_BUILD_ENABLED')
     summary = configure_log.read_text(errors='replace')
+    need(re.search(r'\* install doc:\s+no\s*$', summary, re.M) is not None,
+         'DOCUMENTATION_SUMMARY_MISMATCH')
     for name in ('YJIT', 'RJIT'):
         need(re.search(r'\* ' + name + r' support:\s+no\s*$', summary, re.M) is not None,
              'JIT_SUMMARY_MISSING')
@@ -335,6 +340,24 @@ def documentation_arguments(docs):
     # rdoc is advertised by the installed ri 6.14.0 in CI420; plain is not.
     return [PREFIX + '/bin/ri', '--no-pager', '--format=rdoc',
             '--no-standard-docs', '--doc-dir=' + str(docs), 'String']
+
+
+def documentation_off(build, runtime):
+    # Fixed Ruby 3.4.12 common.mk outputs; EXTOUT is checked before make.
+    relative_outputs = ('.ext/rdoc', '.ext/html', 'doc/capi')
+    for relative in relative_outputs:
+        need(not os.path.lexists(build / relative), 'DOCUMENTATION_GENERATED')
+    docs = Path(runtime['ri_system'])
+    need(str(docs) == PREFIX + '/share/ri/3.4.0/system', 'DOCUMENTATION_PATH')
+    need(not os.path.lexists(docs), 'DOCUMENTATION_INSTALLED')
+    return {'enabled': False, 'system_dir': str(docs), 'system_store_absent': True,
+            'generated_outputs_absent': list(relative_outputs),
+            'standard_lookup_performed': False}
+
+
+def validate_shebang(shebang):
+    need(re.match(r'^#!\s*' + re.escape(PREFIX + '/bin/ruby') + r'(?:\s|$)',
+                  shebang) is not None, 'COMMAND_EXTERNAL_RUBY')
 
 
 def evaluate(source, installer, dependency, expected, report, directory, meter, end):
@@ -405,21 +428,16 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
         if command != 'ruby':
             with path.open('rb') as handle:
                 shebang = handle.readline(512).decode('utf-8')
-            need(re.match(r'^#!\s*/opt/ruby/bin/ruby(?:\s|$)', shebang) is not None, 'COMMAND_EXTERNAL_RUBY')
+            validate_shebang(shebang)
         log = run('command-' + command, [str(path), '--version'], '/tmp',
                   directory, report, meter, 30, end)
         need(0 < log.stat().st_size < 16384, 'COMMAND_OUTPUT')
         report['commands'].append({'name': command, 'path': str(path), 'returncode': 0})
     report['stage'] = 'documentation'
-    docs = Path(value['ri_system'])
-    need(docs.is_dir() and Path(PREFIX) in docs.resolve().parents and
-         (docs / 'String' / 'cdesc-String.ri').is_file(), 'STANDARD_DOCUMENTATION_MISSING')
-    log = run('ri-String', documentation_arguments(docs), '/tmp',
-              directory, report, meter, 30, end)
-    need(log.stat().st_size > 100 and 'String' in log.read_text(errors='replace'), 'STANDARD_DOCUMENTATION_FAILED')
-    report['documentation'] = {'enabled': True, 'system_dir': str(docs),
-                               'standard_String_verified': True, 'other_stores_disabled': True}
+    report['documentation'] = documentation_off(build, value)
     report['stage'] = 'final_state'
+    need(not os.path.lexists('/opt/ruby'), 'DEFAULT_PREFIX_CREATED')
+    report['default_prefix_absent'] = True
     report['public_after'] = public_state()
     need(report['public_before'] == report['public_after'], 'PUBLIC_COMMANDS_CHANGED')
     need(dependency.rpm_state(rpm) == dep['rpm_after'] and
@@ -434,7 +452,7 @@ def main(source, installer, dependency, expected):
     report = {'schema': SCHEMA, 'status': 'INCOMPLETE', 'stage': 'identity', 'runs': [],
               'ruby_build_verified': False, 'p1_04_complete': False, 'phase1_complete': False,
               'role_verified': False, 'idempotence_verified': False,
-              'condition': {'ruby': VERSION, 'prefix': PREFIX, 'documentation': True, 'rust': False,
+              'condition': {'ruby': VERSION, 'prefix': PREFIX, 'documentation': False, 'rust': False,
                             'make_jobs': 1}, 'configure_argv': list(CONFIGURE)}
     start, directory, meter = time.monotonic(), None, None
     def expired(_sig, _frame):
@@ -444,7 +462,7 @@ def main(source, installer, dependency, expected):
     try:
         report['preflight'] = preflight()
         os.umask(0o077)
-        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r29-', dir='/tmp')
+        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r30-', dir='/tmp')
         meter = Meter(directory)
         evaluate(source, installer, dependency, expected, report, directory, meter, start + 2250)
     except Exception as error:

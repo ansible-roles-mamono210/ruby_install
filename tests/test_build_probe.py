@@ -1,4 +1,4 @@
-"""Offline boundary tests for r29; these are not Ruby build or CI results."""
+"""Offline boundary tests for r30; these are not Ruby build or CI results."""
 import copy
 import gzip
 import hashlib
@@ -30,11 +30,11 @@ dependency_host = module('dependency_probe')
 
 
 def runtime_fixture():
-    return {'version': '3.4.12', 'ruby': '/opt/ruby/bin/ruby', 'prefix': '/opt/ruby',
+    return {'version': '3.4.12', 'ruby': '/opt/ruby-3.4.12-docs-off/bin/ruby', 'prefix': '/opt/ruby-3.4.12-docs-off',
             'shared': 'yes', 'yjit_build': 'no', 'rjit_build': 'no',
             'jit': {'YJIT': False, 'RJIT': 'absent'},
-            'shared_libraries': ['/opt/ruby/lib/libruby.so.3.4.12'],
-            'ri_system': '/opt/ruby/share/ri/3.4.0/system',
+            'shared_libraries': ['/opt/ruby-3.4.12-docs-off/lib/libruby.so.3.4.12'],
+            'ri_system': '/opt/ruby-3.4.12-docs-off/share/ri/3.4.0/system',
             'extensions': dict(openssl='test', psych='test', zlib='test', fiddle='test')}
 
 
@@ -118,15 +118,17 @@ class MountTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
-    def make_settings(self, directory, yjit=0, docs='rdoc nodoc'):
+    def make_settings(self, directory, yjit=0, docs='nodoc nodoc'):
         root = Path(directory)
-        (root / 'Makefile').write_text('prefix = /opt/ruby\nENABLE_SHARED = yes\n'
-            'YJIT_SUPPORT=no\nRJIT_SUPPORT = no\nDOCTARGETS = ' + docs + '\n')
+        (root / 'Makefile').write_text('prefix = /opt/ruby-3.4.12-docs-off\nENABLE_SHARED = yes\n'
+            'YJIT_SUPPORT=no\nRJIT_SUPPORT = no\nDOCTARGETS = ' + docs +
+            '\nINSTALLDOC = nodoc\nEXTOUT = .ext\n')
         header = root / '.ext/include/x86_64-linux/ruby/config.h'
         header.parent.mkdir(parents=True)
         header.write_text('#define USE_YJIT ' + str(yjit) + '\n#define USE_RJIT 0\n')
         log = root / 'configure.log'
-        log.write_text('   * YJIT support:        no\n   * RJIT support:        no\n')
+        log.write_text('   * YJIT support:        no\n   * RJIT support:        no\n'
+                       '   * install doc:         no\n')
         return log
 
     def test_summary_makefile_header_agree(self):
@@ -138,9 +140,9 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(worker.Stop, 'JIT_BUILD_ENABLED'):
             worker.build_settings(Path(directory), self.make_settings(directory, yjit=1))
 
-    def test_docs_disabled_fails(self):
+    def test_docs_enabled_fails(self):
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(worker.Stop, 'BUILD_SETTING_MISMATCH'):
-            worker.build_settings(Path(directory), self.make_settings(directory, docs='nodoc nodoc'))
+            worker.build_settings(Path(directory), self.make_settings(directory, docs='rdoc nodoc'))
 
     def test_runtime_good(self):
         worker.validate_runtime(runtime_fixture())
@@ -186,21 +188,151 @@ class DocumentationRegressionTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(text.encode()).hexdigest(),
                          '0d6c293c7f63e9f6ecc547ab5ee462ea90091642c257f4ab3c33d39690bb39e8')
         formats = re.search(r'Valid formatters are:\s+([^\n]+)\.', text)[1].split(', ')
-        argv = worker.documentation_arguments('/opt/ruby/share/ri/3.4.0/system')
+        argv = worker.documentation_arguments('/opt/ruby-3.4.12-docs-off/share/ri/3.4.0/system')
         selected = next(arg.split('=', 1)[1] for arg in argv if arg.startswith('--format='))
         self.assertIn(selected, formats)
         self.assertNotIn('plain', formats)  # The failure seen in the real CI run.
 
     def test_documentation_lookup_keeps_only_the_requested_store(self):
-        docs = '/opt/ruby/share/ri/3.4.0/system'
+        docs = '/opt/ruby-3.4.12-docs-off/share/ri/3.4.0/system'
         argv = worker.documentation_arguments(docs)
-        self.assertEqual(argv[0], '/opt/ruby/bin/ri')
+        self.assertEqual(argv[0], '/opt/ruby-3.4.12-docs-off/bin/ri')
         self.assertEqual([arg for arg in argv if arg.startswith('--doc-dir=')], ['--doc-dir=' + docs])
         self.assertIn('--no-standard-docs', argv)
         self.assertIn('--no-pager', argv)
         self.assertEqual(argv[-1], 'String')
         for extra_store in ('--system', '--site', '--home', '--gems'):
             self.assertNotIn(extra_store, argv)
+
+
+class DocsOffCustomPrefixTests(unittest.TestCase):
+    def test_fixed_condition_disables_docs_with_custom_prefix(self):
+        self.assertEqual(worker.PREFIX, '/opt/ruby-3.4.12-docs-off')
+        self.assertIn('--prefix=' + worker.PREFIX, worker.CONFIGURE)
+        self.assertIn('--disable-install-doc', worker.CONFIGURE)
+        self.assertIn('--disable-yjit', worker.CONFIGURE)
+        self.assertIn('--disable-rjit', worker.CONFIGURE)
+        self.assertNotIn('--enable-install-doc', worker.CONFIGURE)
+        self.assertNotIn('--enable-install-rdoc', worker.CONFIGURE)
+        self.assertIn('ri', worker.COMMANDS)
+        self.assertIn('rdoc', worker.COMMANDS)
+
+    def test_install_target_and_output_location_must_match(self):
+        for old, new in (('INSTALLDOC = nodoc', 'INSTALLDOC = all'),
+                         ('EXTOUT = .ext', 'EXTOUT = /elsewhere')):
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as directory:
+                log = SettingsTests().make_settings(directory)
+                path = Path(directory) / 'Makefile'
+                path.write_text(path.read_text().replace(old, new))
+                with self.assertRaisesRegex(worker.Stop, 'BUILD_SETTING_MISMATCH'):
+                    worker.build_settings(Path(directory), log)
+
+    def test_configure_summary_must_disable_documentation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = SettingsTests().make_settings(directory)
+            log.write_text(log.read_text().replace('install doc:         no', 'install doc:         rdoc'))
+            with self.assertRaisesRegex(worker.Stop, 'DOCUMENTATION_SUMMARY_MISMATCH'):
+                worker.build_settings(Path(directory), log)
+
+    def test_no_doc_outputs_or_store_passes_without_ri_lookup(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(worker, 'PREFIX', directory), \
+                patch.object(worker, 'run') as run:
+            build = Path(directory) / 'build'
+            build.mkdir()
+            runtime = {'ri_system': directory + '/share/ri/3.4.0/system'}
+            row = worker.documentation_off(build, runtime)
+        self.assertIs(row['enabled'], False)
+        self.assertIs(row['system_store_absent'], True)
+        self.assertIs(row['standard_lookup_performed'], False)
+        run.assert_not_called()
+
+    def test_generated_documentation_rejected_in_each_known_output(self):
+        for relative in ('.ext/rdoc', '.ext/html', 'doc/capi'):
+            for kind in ('directory', 'file', 'dangling_symlink'):
+                with self.subTest(relative=relative, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    build = Path(directory) / 'build'
+                    target = build / relative
+                    target.parent.mkdir(parents=True)
+                    if kind == 'directory':
+                        target.mkdir()
+                    elif kind == 'file':
+                        target.write_text('unexpected documentation')
+                    else:
+                        target.symlink_to('missing')
+                    with self.assertRaisesRegex(worker.Stop, 'DOCUMENTATION_GENERATED'):
+                        worker.documentation_off(build, runtime_fixture())
+
+    def test_installed_standard_documentation_rejected(self):
+        for kind in ('directory', 'file', 'dangling_symlink'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(worker, 'PREFIX', directory):
+                docs = Path(directory) / 'share/ri/3.4.0/system'
+                docs.parent.mkdir(parents=True)
+                if kind == 'directory':
+                    docs.mkdir()
+                elif kind == 'file':
+                    docs.write_text('unexpected documentation')
+                else:
+                    docs.symlink_to('missing')
+                with self.assertRaisesRegex(worker.Stop, 'DOCUMENTATION_INSTALLED'):
+                    worker.documentation_off(Path(directory) / 'build', {'ri_system': str(docs)})
+
+    def test_external_documentation_path_cannot_hide_installed_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for bad in ('/opt/ruby/share/ri/3.4.0/system', worker.PREFIX + '/share/ri/../missing'):
+                with self.subTest(path=bad), self.assertRaisesRegex(worker.Stop, 'DOCUMENTATION_PATH'):
+                    worker.documentation_off(Path(directory), {'ri_system': bad})
+
+    def test_default_prefix_runtime_cannot_pass_custom_condition(self):
+        row = runtime_fixture()
+        row = json.loads(json.dumps(row).replace(worker.PREFIX, '/opt/ruby'))
+        with self.assertRaisesRegex(worker.Stop, 'RUNTIME_IDENTITY'):
+            worker.validate_runtime(row)
+
+    def test_shebang_uses_exact_custom_ruby_and_escapes_dots(self):
+        worker.validate_shebang('#!' + worker.PREFIX + '/bin/ruby\n')
+        for wrong in ('/opt/ruby/bin/ruby', '/usr/bin/env ruby',
+                      worker.PREFIX.replace('.', 'X') + '/bin/ruby',
+                      worker.PREFIX + '/bin/ruby-other'):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(worker.Stop, 'COMMAND_EXTERNAL_RUBY'):
+                worker.validate_shebang('#!' + wrong + '\n')
+
+    def test_ci_invokes_new_condition_and_old_flag_is_rejected(self):
+        config = yaml.safe_load((host.ROOT.parents[1] / '.circleci/config.yml').read_text())
+        command = config['jobs']['p1-ruby-build']['steps'][1]['run']['command']
+        self.assertIn('--allow-ruby-3412-docs-off-build', command)
+        self.assertNotIn('--allow-ruby-3412-build', command)
+        with patch.object(host.os, 'open') as output, \
+                patch.object(host.subprocess, 'run') as run, patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit):
+                host.main(['--output', '/unused', '--allow-ruby-3412-build'])
+        output.assert_not_called()
+        run.assert_not_called()
+
+    def test_host_rejects_docs_on_and_missing_custom_prefix_evidence(self):
+        fixture = HostTests().success_fixture()
+        for update in ({'condition': dict(fixture['condition'], documentation=True)},
+                       {'condition': dict(fixture['condition'], prefix='/opt/ruby')},
+                       {'default_prefix_absent': False}):
+            row = dict(fixture, **update)
+            with self.subTest(update=update), self.assertRaises(host.Stop):
+                host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
+
+    def test_host_requires_all_documentation_evidence(self):
+        for key, value in (('enabled', True), ('system_store_absent', False),
+                           ('generated_outputs_absent', []), ('standard_lookup_performed', True),
+                           ('system_dir', '/opt/ruby/share/ri/3.4.0/system'),
+                           ('enabled', 0), ('system_store_absent', 1), ('standard_lookup_performed', 0)):
+            row = HostTests().success_fixture()
+            row['documentation'][key] = value
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(host.Stop, 'BUILD_DOCUMENTATION_SCHEMA'):
+                host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
+
+    def test_host_rejects_unplanned_documentation_lookup(self):
+        row = HostTests().success_fixture()
+        row['runs'].append(dict(row['runs'][-1], name='ri-String'))
+        with self.assertRaisesRegex(host.Stop, 'BUILD_RUNS_SCHEMA'):
+            host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
 
 
 class FailureMeasurementTests(unittest.TestCase):
@@ -320,7 +452,7 @@ class FailureMeasurementTests(unittest.TestCase):
                     patch.object(host.subprocess, 'run', return_value=SimpleNamespace(
                         stdout=json.dumps(value), stderr='', returncode=3)) as docker, patch('builtins.print'):
                 result = host.main(['--output', str(target), '--allow-pull', '--allow-install',
-                    '--allow-ci416-replacements', '--allow-ruby-3412-build', '--ephemeral-ci'])
+                    '--allow-ci416-replacements', '--allow-ruby-3412-docs-off-build', '--ephemeral-ci'])
             saved = json.loads(target.read_text())
         self.assertEqual(result, 3)
         self.assertEqual(saved['status'], 'INCOMPLETE')
@@ -334,15 +466,16 @@ class FailureMeasurementTests(unittest.TestCase):
 class HostTests(unittest.TestCase):
     def success_fixture(self):
         names = ['configure-negative', 'configure', 'make', 'install', 'runtime']
-        names += ['command-' + n for n in worker.COMMANDS] + ['ri-String']
+        names += ['command-' + n for n in worker.COMMANDS]
         return {'schema': worker.SCHEMA, 'status': worker.SUCCESS, 'stage': 'finished',
-            'condition': {'ruby': '3.4.12', 'prefix': '/opt/ruby', 'documentation': True,
+            'condition': {'ruby': '3.4.12', 'prefix': '/opt/ruby-3.4.12-docs-off', 'documentation': False,
                           'rust': False, 'make_jobs': 1}, 'configure_argv': list(worker.CONFIGURE),
             'p1_04_complete': False, 'phase1_complete': False, 'role_verified': False,
             'idempotence_verified': False, 'full_workspace_retained': False,
             'ruby_build_verified': True, 'unknown_option_rejected': True,
             'rust_absent_after_dependencies': True, 'public_commands_unchanged': True,
             'rpm_and_repo_state_unchanged_by_build': True, 'ci_container_cleanup_required': True,
+            'default_prefix_absent': True,
             'elapsed_seconds': 600, 'dependencies': dependency_fixture(), 'runtime': runtime_fixture(),
             'source': {'version': '3.4.12', 'sha256': worker.SOURCE_SHA,
                 'sha256_expected': worker.SOURCE_SHA, 'checksum_match': True, 'http_status': 200,
@@ -350,12 +483,15 @@ class HostTests(unittest.TestCase):
                 'redirect_policy': 'no_redirect_followed', 'bytes': 23000000},
             'public_before': dict.fromkeys(range(18), 'absent'),
             'public_after': dict.fromkeys(range(18), 'absent'),
-            'commands': [{'name': n, 'path': '/opt/ruby/bin/' + n, 'returncode': 0} for n in worker.COMMANDS],
+            'commands': [{'name': n, 'path': '/opt/ruby-3.4.12-docs-off/bin/' + n, 'returncode': 0} for n in worker.COMMANDS],
             'build_settings': {'USE_YJIT': 0, 'USE_RJIT': 0, 'configure_summary_jit_disabled': True,
-                'makefile_values': {'prefix': '/opt/ruby', 'ENABLE_SHARED': 'yes', 'YJIT_SUPPORT': 'no',
-                                   'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc'}},
-            'documentation': {'enabled': True, 'system_dir': '/opt/ruby/share/ri/3.4.0/system',
-                              'standard_String_verified': True, 'other_stores_disabled': True},
+                'makefile_values': {'prefix': '/opt/ruby-3.4.12-docs-off', 'ENABLE_SHARED': 'yes', 'YJIT_SUPPORT': 'no',
+                                   'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'nodoc nodoc',
+                                   'INSTALLDOC': 'nodoc', 'EXTOUT': '.ext'}},
+            'documentation': {'enabled': False, 'system_dir': '/opt/ruby-3.4.12-docs-off/share/ri/3.4.0/system',
+                              'system_store_absent': True,
+                              'generated_outputs_absent': ['.ext/rdoc', '.ext/html', 'doc/capi'],
+                              'standard_lookup_performed': False},
             'runs': [{'name': n, 'returncode': 1 if n == 'configure-negative' else 0,
                       'elapsed_seconds': 1, 'bytes': 10, 'sha256': 'a' * 64, 'tail': 'diagnostic'} for n in names],
             'resources': {'sample_count': 10}, 'prefix_size': {'allocated_bytes': 1000000}}
@@ -419,7 +555,7 @@ class HostTests(unittest.TestCase):
             self.assertNotIn(option, argv)
         self.assertEqual(argv[argv.index('--memory') + 1], '2g')
         self.assertEqual(argv[argv.index('--memory-swap') + 1], '2g')
-        self.assertIn('RUBY_P1_BUILD_PROBE=r29', argv)
+        self.assertIn('RUBY_P1_BUILD_PROBE=r30', argv)
 
     def test_hash_checked_helpers_and_bundle_compile(self):
         for filename in host.HELPERS:

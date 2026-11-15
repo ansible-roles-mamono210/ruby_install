@@ -55,7 +55,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Evaluate Ruby 3.4.12 with standard documentation in one disposable target
+          name: Evaluate Ruby 3.4.12 without docs at a custom prefix in one disposable target
           no_output_timeout: 45m
           command: |
             set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
             timeout --signal=TERM --kill-after=60s 44m \
               python3 scripts/p1/build_probe.py \
               --allow-pull --ephemeral-ci --allow-install --allow-ci416-replacements \
-              --allow-ruby-3412-build --output p1-evidence/environment.json
+              --allow-ruby-3412-docs-off-build --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
             printf '%s\n' "$p1_probe_rc" > p1-evidence/exit-code.txt
