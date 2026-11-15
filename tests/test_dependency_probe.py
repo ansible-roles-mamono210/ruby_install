@@ -1,6 +1,7 @@
 """Offline DNF boundary tests; the DNF API itself is verified only in the planned CI."""
 import contextlib
 import copy
+import ctypes
 import errno
 import importlib.util
 import io
@@ -136,7 +137,8 @@ def failure_report():
                 'stage': 'metadata_load', 'condition': 'crb_off', 'package': 'none',
                 'reason': 'DEPENDENCY_API_OR_METADATA_ERROR', 'exception_kind': 'OS_ERROR',
                 'errno': 'EROFS', 'state_check': 'MATCH',
-                'error_chain': w.error_chain(OSError(errno.EROFS, 'SECRET'))}}
+                'error_chain': w.error_chain(OSError(errno.EROFS, 'SECRET')),
+                'versions': {'dnf': '4.14.0', 'rpm': '4.16.1.3'}}}
 
 
 def raised_in(module, name, error, inner=None):
@@ -242,7 +244,8 @@ class ErrorChainTests(unittest.TestCase):
     def test_parser_accepts_diagnostics_only_as_failure(self):
         value = failure_report()
         value['diagnostic']['error_chain']['items'][0].update(
-            kind='DNF_REPO_ERROR', errno='NONE', frame='REPOSITORY_LOAD')
+            kind='DNF_REPO_ERROR', errno='NONE', frame='REPOSITORY_LOAD',
+            message={'state': 'UNMAPPED', 'repository': 'NONE', 'signals': []})
         summary = h.failure_summary(json.dumps(value), w)
         self.assertEqual(summary['state'], 'VALIDATED_FAILURE_ONLY')
         self.assertEqual(summary['diagnostic']['error_chain'], value['diagnostic']['error_chain'])
@@ -272,6 +275,159 @@ class ErrorChainTests(unittest.TestCase):
     def test_parser_rejects_nested_duplicate_keys(self):
         value = json.dumps(failure_report()).replace('"link":', '"link":"PRIVATE","link":', 1)
         self.assertEqual(h.failure_summary(value, w), {'state': 'INVALID_JSON'})
+
+
+class NativeMessageTests(unittest.TestCase):
+    @staticmethod
+    def native(message):
+        # Same CPython API/name used by the verified SWIG error.i source.
+        create = ctypes.pythonapi.PyErr_NewException
+        create.argtypes = [ctypes.c_char_p, ctypes.py_object, ctypes.py_object]
+        create.restype = ctypes.py_object
+        cls = create(b'libdnf._error.Error', Exception, {})
+        return cls(message)
+
+    def test_actual_cpython_native_exception_name_is_recognized(self):
+        error = self.native('PRIVATE')
+        self.assertEqual(type(error).__module__, 'libdnf._error')
+        item = w.error_chain(error)['items'][0]
+        self.assertEqual(item['kind'], 'LIBDNF_ERROR')
+        self.assertEqual(item['message'], {'state': 'UNMAPPED', 'repository': 'NONE', 'signals': []})
+
+    def test_download_wrapper_separates_repo_dns_and_tls_without_exporting_text(self):
+        for repo, code, expected in [('baseos', 6, 'CURL_DNS'),
+                                     ('appstream', 60, 'CURL_TLS_VERIFY'),
+                                     ('crb', 77, 'CURL_CA_FILE'),
+                                     ('PRIVATE_REPO', 7, 'CURL_CONNECT')]:
+            text = (f"Failed to download metadata for repo '{repo}': "
+                    f'Cannot prepare internal mirrorlist: Curl error ({code}): '
+                    'PRIVATE_DETAIL for https://PRIVATE_USER:PRIVATE_PASSWORD@private.invalid/PRIVATE '
+                    '[PRIVATE_TOKEN]')
+            item = w.error_chain(self.native(text))['items'][0]['message']
+            self.assertEqual(item['repository'], repo if repo in w.REPOS else 'OTHER')
+            self.assertEqual(set(item['signals']), {'METADATA_DOWNLOAD', 'MIRRORLIST_PREPARE', expected})
+            self.assertNotIn('PRIVATE', json.dumps(item))
+            self.assertNotIn('private.invalid', json.dumps(item))
+
+    def test_curl_code_clues_remain_distinct_and_unknown_codes_are_not_echoed(self):
+        for code, expected in [('5', 'CURL_PROXY_DNS'), ('22', 'CURL_HTTP'),
+                ('23', 'CURL_WRITE'), ('26', 'CURL_READ'), ('27', 'CURL_MEMORY'),
+                ('28', 'CURL_TIMEOUT'), ('35', 'CURL_TLS_CONNECT'), ('47', 'CURL_REDIRECT_LIMIT'),
+                ('55', 'CURL_SEND'), ('56', 'CURL_RECEIVE'), ('999', 'CURL_OTHER')]:
+            item = w.error_chain(self.native(f'Curl error ({code}): PRIVATE'))['items'][0]['message']
+            self.assertEqual(item['signals'], [expected])
+
+    def test_http_status_is_separate_from_filesystem_permissions(self):
+        for code, expected in [('401', 'HTTP_401'), ('403', 'HTTP_403'), ('404', 'HTTP_404'),
+                               ('429', 'HTTP_429'), ('503', 'HTTP_5XX'), ('418', 'HTTP_OTHER')]:
+            item = w.error_chain(self.native('Status code: ' + code + ' for https://PRIVATE'))['items'][0]
+            self.assertEqual(item['message']['signals'], [expected])
+            self.assertEqual(item['errno'], 'NONE')
+
+    def test_directory_failures_keep_operation_and_os_text_as_clues_only(self):
+        cases = [('repo temporary directory', 'Read-only file system', 'REPO_TEMP_CREATE', 'FS_READ_ONLY'),
+                 ('repo destination directory', 'Permission denied', 'REPO_DEST_CREATE', 'FS_PERMISSION'),
+                 ('persistdir', 'No space left on device', 'REPO_PERSIST_CREATE', 'FS_NO_SPACE'),
+                 ('directory', 'No such file or directory', 'REPO_DIR_CREATE', 'FS_MISSING')]
+        for operation, phrase, a, b in cases:
+            item = w.error_chain(self.native(f'Cannot create {operation} "/PRIVATE/PATH": {phrase}'))['items'][0]
+            self.assertEqual(item['message']['signals'], sorted([a, b]))
+            self.assertEqual(item['errno'], 'NONE')
+            self.assertNotIn('PRIVATE', json.dumps(item))
+
+    def test_urls_and_paths_are_not_searched_for_error_keywords(self):
+        texts = ['https://private.invalid/Curl error (60): fake',
+                 'Unknown error: Status code: 403 for PRIVATE',
+                 'Cannot create directory "/PRIVATE/Permission denied": Unmapped error',
+                 'Unrecognized translation: Curl error (6): PRIVATE']
+        for text in texts:
+            item = w.error_chain(self.native(text))['items'][0]['message']
+            self.assertEqual(item['state'], 'UNMAPPED')
+            self.assertEqual(item['signals'], [])
+
+    def test_known_message_limit_has_no_truncated_or_silent_positive_match(self):
+        prefix = 'Curl error (6): '
+        for size, state in [(4096, 'MATCHED'), (4097, 'LIMIT')]:
+            item = w.error_chain(self.native(prefix + 'x' * (size - len(prefix))))['items'][0]['message']
+            self.assertEqual(item['state'], state)
+            if state == 'LIMIT':
+                self.assertEqual(item['signals'], [])
+
+    def test_objects_and_custom_formatters_are_never_invoked(self):
+        def forbidden(*_):
+            raise AssertionError('must not read text through custom methods')
+        dangerous = type('Dangerous', (), {'__str__': forbidden, '__repr__': forbidden})()
+        cls = type('RepoError', (Exception,), {'__module__': 'dnf.exceptions',
+                    '__str__': forbidden, '__repr__': forbidden, 'args': property(forbidden)})
+        for arg in (dangerous, ['PRIVATE'], 6):
+            self.assertEqual(w.error_chain(cls(arg))['items'][0]['message']['state'], 'NO_TEXT')
+        item = w.error_chain(cls('Curl error (6): PRIVATE'))['items'][0]
+        self.assertEqual(item['message']['signals'], ['CURL_DNS'])
+        self.assertNotIn('PRIVATE', json.dumps(item))
+
+    def test_non_native_exceptions_do_not_gain_text_based_classification(self):
+        for error in (RuntimeError('Curl error (6): PRIVATE'),
+                      Exception('Status code: 403 for PRIVATE')):
+            self.assertEqual(w.error_chain(error)['items'][0]['message']['state'], 'NOT_APPLICABLE')
+
+    def test_dnf_value_storage_works_with_empty_args_and_no_context(self):
+        def forbidden(*_):
+            raise AssertionError('must not invoke formatter or descriptor')
+        cls = type('RepoError', (Exception,), {'__module__': 'dnf.exceptions',
+                    '__str__': forbidden, '__repr__': forbidden, 'value': property(forbidden)})
+        error = cls()
+        BaseException.__dict__['__dict__'].__get__(error)['value'] = 'Curl error (28): PRIVATE'
+        self.assertEqual(error.args, ())
+        item = w.error_chain(error)['items'][0]
+        self.assertEqual(item['message']['signals'], ['CURL_TIMEOUT'])
+        BaseException.__dict__['__dict__'].__get__(error)['value'] = object()
+        self.assertEqual(w.error_chain(error)['items'][0]['message']['state'], 'NO_TEXT')
+
+    def test_version_information_is_bounded_numeric_or_unknown(self):
+        for value in ('4.14.0', '4.16.1.3'):
+            self.assertEqual(w.version_code(value), value)
+        for value in (None, 4.14, True, 'PRIVATE', '4.14.0-PRIVATE', '4.' + '1' * 10000):
+            self.assertEqual(w.version_code(value), 'UNKNOWN')
+
+    def test_native_failure_roundtrips_as_failure_not_success(self):
+        value = failure_report()
+        value['diagnostic']['error_chain'] = w.error_chain(self.native(
+            "Failed to download metadata for repo 'baseos': Curl error (6): PRIVATE"))
+        result = h.failure_summary(json.dumps(value), w)
+        self.assertEqual(result['state'], 'VALIDATED_FAILURE_ONLY')
+        self.assertEqual(result['diagnostic']['versions'], value['diagnostic']['versions'])
+        with self.assertRaises(h.Stop):
+            h.validate(value, w)
+
+    def test_host_rejects_message_payloads_bad_types_and_inconsistent_states(self):
+        mutations = [lambda m: m.update(text='PRIVATE'), lambda m: m.update(repository='PRIVATE'),
+            lambda m: m.update(signals=['PRIVATE']), lambda m: m.update(signals=[{}]),
+            lambda m: m.update(signals=['CURL_DNS', 'CURL_DNS']), lambda m: m.update(signals=[]),
+            lambda m: m.update(signals=list(sorted(w.MESSAGE_SIGNALS))[:6]),
+            lambda m: m.update(state='NOT_APPLICABLE'), lambda m: m.update(state='LIMIT'),
+            lambda m: m.update(state=True), lambda m: m.update(repository='baseos')]
+        for mutate in mutations:
+            value = failure_report()
+            value['diagnostic']['error_chain'] = w.error_chain(self.native('Curl error (6): PRIVATE'))
+            mutate(value['diagnostic']['error_chain']['items'][0]['message'])
+            self.assertEqual(h.failure_summary(json.dumps(value), w), {'state': 'INVALID_SCHEMA'})
+        for bad in (None, {}, {'dnf': 'PRIVATE', 'rpm': '4.0'}, {'dnf': True, 'rpm': '4.0'},
+                    {'dnf': '4.0', 'rpm': '4.0', 'path': 'PRIVATE'}):
+            value = failure_report()
+            value['diagnostic']['versions'] = bad
+            self.assertEqual(h.failure_summary(json.dumps(value), w), {'state': 'INVALID_SCHEMA'})
+
+    def test_four_native_items_stay_below_host_size_limit(self):
+        items = [self.native("Failed to download metadata for repo 'baseos': "
+                            'Cannot prepare internal mirrorlist: Curl error (60): PRIVATE') for _ in range(4)]
+        for left, right in zip(items, items[1:]):
+            left.__cause__ = right
+        value = failure_report()
+        value['diagnostic']['error_chain'] = w.error_chain(items[0])
+        payload = json.dumps(value)
+        self.assertLess(len(payload.encode()), 8192)
+        self.assertNotIn('PRIVATE', payload)
+        self.assertEqual(h.failure_summary(payload, w)['state'], 'VALIDATED_FAILURE_ONLY')
 
 
 class TemporaryRootTests(unittest.TestCase):

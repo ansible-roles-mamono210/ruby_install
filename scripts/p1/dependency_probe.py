@@ -122,6 +122,23 @@ def validate_condition(item, crb, worker):
         raise Stop('WORKER_SCHEMA')
 
 
+def valid_message(value, kind, worker):
+    if (type(value) is not dict or set(value) != {'state', 'repository', 'signals'}
+            or type(value['state']) is not str or value['state'] not in worker.MESSAGE_STATES
+            or type(value['repository']) is not str
+            or value['repository'] not in ('NONE', 'OTHER', *worker.REPOS)
+            or type(value['signals']) is not list or len(value['signals']) > 5
+            or any(type(s) is not str or s not in worker.MESSAGE_SIGNALS for s in value['signals'])
+            or value['signals'] != sorted(set(value['signals']))):
+        return False
+    applicable = kind in ('DNF_REPO_ERROR', 'LIBDNF_ERROR')
+    if (value['state'] == 'NOT_APPLICABLE') == applicable:
+        return False
+    if (value['state'] == 'MATCHED') != bool(value['signals']):
+        return False
+    return (value['repository'] != 'NONE') == ('METADATA_DOWNLOAD' in value['signals'])
+
+
 def valid_error_chain(value, worker):
     if (type(value) is not dict or set(value) != {'state', 'items'}
             or type(value['state']) is not str or value['state'] not in ('COMPLETE', 'CYCLE', 'LIMIT')
@@ -131,11 +148,12 @@ def valid_error_chain(value, worker):
     allowed = {'kind': worker.CHAIN_KINDS, 'errno': ('NONE', 'OTHER', *worker.ERRNO_CODES.values()),
                'frame': worker.FRAME_TAGS, 'frames': ('COMPLETE', 'LIMIT')}
     for index, item in enumerate(value['items']):
-        if (type(item) is not dict or set(item) != set(allowed) | {'link'}
+        if (type(item) is not dict or set(item) != set(allowed) | {'link', 'message'}
                 or type(item['link']) is not str
                 or item['link'] not in (('SELF',) if index == 0 else ('CAUSE', 'CONTEXT'))
                 or any(type(item[k]) is not str or item[k] not in values
-                       for k, values in allowed.items())):
+                       for k, values in allowed.items())
+                or not valid_message(item['message'], item['kind'], worker)):
             return False
     return True
 
@@ -170,14 +188,18 @@ def failure_summary(stdout, worker):
                'exception_kind': worker.EXCEPTION_KINDS,
                'errno': ('NONE', 'OTHER', *worker.ERRNO_CODES.values()),
                'state_check': worker.STATE_CHECKS}
-    if (type(detail) is not dict or set(detail) != set(allowed) | {'error_chain'}
+    if (type(detail) is not dict or set(detail) != set(allowed) | {'error_chain', 'versions'}
             or any(type(detail[key]) is not str or detail[key] not in values
                    for key, values in allowed.items())
-            or not valid_error_chain(detail['error_chain'], worker)):
+            or not valid_error_chain(detail['error_chain'], worker)
+            or type(detail['versions']) is not dict or set(detail['versions']) != {'dnf', 'rpm'}
+            or any(type(v) is not str or (v != 'UNKNOWN' and not worker.VERSION_PATTERN.fullmatch(v))
+                   for v in detail['versions'].values())):
         return {'state': 'INVALID_SCHEMA'}
     return {'state': 'VALIDATED_FAILURE_ONLY', 'reason': value['reason'],
             'worker_stage': value['stage'],
-            'diagnostic': dict({k: detail[k] for k in allowed}, error_chain=detail['error_chain'])}
+            'diagnostic': dict({k: detail[k] for k in allowed}, error_chain=detail['error_chain'],
+                               versions=detail['versions'])}
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
@@ -195,12 +217,12 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-dependency-run-r24', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-dependency-run-r25', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_03_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     runtime = None
     possible = False
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-dependency-r24'
+    name = 'ruby-p1-' + run_id + '-dependency-r25'
     handlers = {}
     try:
         def interrupted(_signum, _frame):
