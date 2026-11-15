@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 import time
 
-SCHEMA = 'ruby-p1-build-container-r28'
+SCHEMA = 'ruby-p1-build-container-r29'
 SUCCESS = 'RUBY_3412_DOCS_ON_BUILD_VERIFIED'
 VERSION = '3.4.12'
 PREFIX = '/opt/ruby'
@@ -25,7 +25,7 @@ COMMANDS = ('ruby', 'gem', 'bundle', 'bundler', 'irb', 'erb', 'rdoc', 'ri', 'rak
 CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby',
              '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-rjit',
              '--enable-install-doc', '--enable-install-rdoc', '--disable-install-capi')
-UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r28'
+UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r29'
 MIN_FREE = 8 * 1024 ** 3
 MAX_LOG = 64 * 1024 ** 2
 TAIL_BYTES = 16384
@@ -59,7 +59,7 @@ def mount_for(path, text):
 
 
 def preflight():
-    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r28' and os.getuid() == 0
+    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r29' and os.getuid() == 0
          and platform.system() == 'Linux' and platform.machine() == 'x86_64'
          and platform.python_version() == '3.9.19' and Path('/.dockerenv').is_file(), 'IDENTITY')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
@@ -109,7 +109,7 @@ def download(source, directory, row):
     path = Path(directory) / 'source.tar.gz'
     try:
         connection.request('GET', fixed[1], headers={'Accept-Encoding': 'identity',
-                           'User-Agent': 'ruby-p1-build-measurement-r28'})
+                           'User-Agent': 'ruby-p1-build-measurement-r29'})
         response = connection.getresponse()
         row['http_status'] = response.status
         need(response.status == 200, 'SOURCE_HTTP_STATUS_OR_REDIRECT')
@@ -331,6 +331,12 @@ def validate_runtime(value):
          and all(type(v) is str and 0 < len(v) < 256 for v in value['extensions'].values()), 'EXTENSIONS')
 
 
+def documentation_arguments(docs):
+    # rdoc is advertised by the installed ri 6.14.0 in CI420; plain is not.
+    return [PREFIX + '/bin/ri', '--no-pager', '--format=rdoc',
+            '--no-standard-docs', '--doc-dir=' + str(docs), 'String']
+
+
 def evaluate(source, installer, dependency, expected, report, directory, meter, end):
     report['public_before'] = public_state()
     report['stage'] = 'dependencies'
@@ -408,8 +414,7 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
     docs = Path(value['ri_system'])
     need(docs.is_dir() and Path(PREFIX) in docs.resolve().parents and
          (docs / 'String' / 'cdesc-String.ri').is_file(), 'STANDARD_DOCUMENTATION_MISSING')
-    log = run('ri-String', [PREFIX + '/bin/ri', '--no-pager', '--format=plain',
-              '--no-standard-docs', '--doc-dir=' + str(docs), 'String'], '/tmp',
+    log = run('ri-String', documentation_arguments(docs), '/tmp',
               directory, report, meter, 30, end)
     need(log.stat().st_size > 100 and 'String' in log.read_text(errors='replace'), 'STANDARD_DOCUMENTATION_FAILED')
     report['documentation'] = {'enabled': True, 'system_dir': str(docs),
@@ -439,7 +444,7 @@ def main(source, installer, dependency, expected):
     try:
         report['preflight'] = preflight()
         os.umask(0o077)
-        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r28-', dir='/tmp')
+        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r29-', dir='/tmp')
         meter = Meter(directory)
         evaluate(source, installer, dependency, expected, report, directory, meter, start + 2250)
     except Exception as error:
@@ -450,6 +455,13 @@ def main(source, installer, dependency, expected):
         signal.signal(signal.SIGALRM, previous_alarm)
         report['elapsed_seconds'] = round(time.monotonic() - start, 3)
         if meter is not None:
+            # Preserve partial measurements on failure without replacing its cause.
+            # Missing fields remain missing; never synthesize a successful measurement.
+            try:
+                meter.sample()
+                report['prefix_size'] = size_tree(PREFIX)
+            except Exception:
+                report['measurement_snapshot_error'] = 'FINAL_RESOURCE_SNAPSHOT_FAILED'
             report['resources'] = meter.data
         # CI-only cleanup: bounded log tails survive in JSON; the host deletes this container.
         # This does not implement the Role's failure-workspace retention contract.

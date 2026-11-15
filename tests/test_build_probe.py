@@ -1,4 +1,4 @@
-"""Offline boundary tests for r28; these are not Ruby build or CI results."""
+"""Offline boundary tests for r29; these are not Ruby build or CI results."""
 import copy
 import gzip
 import hashlib
@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -178,6 +180,157 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(report['runs'][0]['returncode'], -9)
 
 
+class DocumentationRegressionTests(unittest.TestCase):
+    def test_formatter_is_supported_by_actual_ci420_help(self):
+        text = (Path(__file__).parent / 'fixtures/ci420_ri_help.txt').read_text()
+        self.assertEqual(hashlib.sha256(text.encode()).hexdigest(),
+                         '0d6c293c7f63e9f6ecc547ab5ee462ea90091642c257f4ab3c33d39690bb39e8')
+        formats = re.search(r'Valid formatters are:\s+([^\n]+)\.', text)[1].split(', ')
+        argv = worker.documentation_arguments('/opt/ruby/share/ri/3.4.0/system')
+        selected = next(arg.split('=', 1)[1] for arg in argv if arg.startswith('--format='))
+        self.assertIn(selected, formats)
+        self.assertNotIn('plain', formats)  # The failure seen in the real CI run.
+
+    def test_documentation_lookup_keeps_only_the_requested_store(self):
+        docs = '/opt/ruby/share/ri/3.4.0/system'
+        argv = worker.documentation_arguments(docs)
+        self.assertEqual(argv[0], '/opt/ruby/bin/ri')
+        self.assertEqual([arg for arg in argv if arg.startswith('--doc-dir=')], ['--doc-dir=' + docs])
+        self.assertIn('--no-standard-docs', argv)
+        self.assertIn('--no-pager', argv)
+        self.assertEqual(argv[-1], 'String')
+        for extra_store in ('--system', '--site', '--home', '--gems'):
+            self.assertNotIn(extra_store, argv)
+
+
+class FailureMeasurementTests(unittest.TestCase):
+    def observation(self):
+        return {'schema': worker.SCHEMA, 'status': 'INCOMPLETE', 'stage': 'documentation',
+                'reason': 'COMMAND_FAILED', 'runs': [], 'elapsed_seconds': 410.5,
+                'resources': {'sample_count': 80, 'sample_interval_seconds': 5,
+                    'workspace_peak_allocated_bytes_sampled': 800000000,
+                    'prefix_peak_allocated_bytes_sampled': 200000000,
+                    'combined_peak_allocated_bytes_sampled': 1000000000,
+                    'minimum_free_bytes_sampled': 9000000000,
+                    'memory_peak_bytes': 1000000000, 'memory_peak_source': '/sys/fs/cgroup/memory.peak'},
+                'prefix_size': {'apparent_bytes': 180000000, 'allocated_bytes': 200000000}}
+
+    def test_partial_values_survive_diagnostics_without_becoming_pass(self):
+        row = self.observation()
+        result = host.diagnostics(row)
+        part = result['partial_measurements']
+        self.assertEqual(part['resources'], row['resources'])
+        self.assertEqual(part['prefix_size'], row['prefix_size'])
+        self.assertEqual(part['elapsed_seconds'], 410.5)
+        self.assertIs(part['complete'], False)
+        self.assertEqual(result['reason'], 'COMMAND_FAILED')
+        with self.assertRaises(host.Stop):
+            host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
+
+    def test_unavailable_memory_and_missing_fields_are_not_zero(self):
+        row = self.observation()
+        row['resources'] = {'memory_peak_bytes': None, 'memory_peak_source': 'unavailable'}
+        del row['prefix_size']
+        result = host.diagnostics(row)['partial_measurements']
+        self.assertIsNone(result['resources']['memory_peak_bytes'])
+        self.assertNotIn('sample_count', result['resources'])
+        self.assertNotIn('prefix_size', result)
+
+    def test_unknown_keys_paths_and_pass_flags_are_not_retained(self):
+        row = self.observation()
+        row['resources'].update(secret='PRIVATE', memory_peak_source='/private/secret', phase1_complete=True)
+        row['prefix_size'].update(path='/private/secret', token='PRIVATE')
+        row.update(phase1_complete=True, measurement_snapshot_error='PRIVATE')
+        text = json.dumps(host.diagnostics(row)['partial_measurements'])
+        for forbidden in ('PRIVATE', '/private', 'phase1_complete', 'measurement_snapshot_error'):
+            self.assertNotIn(forbidden, text)
+
+    def test_invalid_measurements_are_omitted(self):
+        for invalid in (True, -1, '123', 1.25, 2 ** 63, float('nan'), float('inf'), [], {}):
+            row = self.observation()
+            row['resources']['memory_peak_bytes'] = invalid
+            row['prefix_size']['allocated_bytes'] = invalid
+            with self.subTest(value=repr(invalid)):
+                part = host.diagnostics(row)['partial_measurements']
+                self.assertNotIn('memory_peak_bytes', part['resources'])
+                self.assertNotIn('allocated_bytes', part['prefix_size'])
+        for invalid in (True, -1, '123', 2521, float('nan'), float('inf')):
+            row = self.observation()
+            row['elapsed_seconds'] = invalid
+            self.assertNotIn('elapsed_seconds', host.diagnostics(row)['partial_measurements'])
+
+    def test_worker_failure_preserves_final_snapshot(self):
+        row = self.observation()
+        meter = Mock(data=row['resources'])
+        def fail(*args):
+            args[4]['stage'] = 'documentation'
+            raise worker.Stop('COMMAND_FAILED')
+        with patch.object(worker, 'preflight', return_value={}), \
+                patch.object(worker.tempfile, 'mkdtemp', return_value='/unused'), \
+                patch.object(worker.os, 'umask'), patch.object(worker, 'Meter', return_value=meter), \
+                patch.object(worker, 'evaluate', side_effect=fail), \
+                patch.object(worker, 'size_tree', return_value=row['prefix_size']), patch('builtins.print') as printed:
+            self.assertEqual(worker.main(source, installer, dependency, PLAN), 3)
+        saved = json.loads(printed.call_args.args[0])
+        self.assertEqual(saved['prefix_size'], row['prefix_size'])
+        self.assertEqual(saved['resources'], row['resources'])
+        self.assertEqual(saved['reason'], 'COMMAND_FAILED')
+        self.assertEqual(saved['status'], 'INCOMPLETE')
+        meter.sample.assert_called_once()
+
+    def test_snapshot_error_does_not_replace_original_failure_or_samples(self):
+        meter = Mock(data={'sample_count': 12, 'memory_peak_bytes': None})
+        meter.sample.side_effect = OSError('PRIVATE')
+        with patch.object(worker, 'preflight', return_value={}), \
+                patch.object(worker.tempfile, 'mkdtemp', return_value='/unused'), \
+                patch.object(worker.os, 'umask'), patch.object(worker, 'Meter', return_value=meter), \
+                patch.object(worker, 'evaluate', side_effect=worker.Stop('COMMAND_FAILED')), \
+                patch('builtins.print') as printed:
+            self.assertEqual(worker.main(source, installer, dependency, PLAN), 3)
+        row = json.loads(printed.call_args.args[0])
+        self.assertEqual(row['reason'], 'COMMAND_FAILED')
+        self.assertEqual(row['resources']['sample_count'], 12)
+        part = host.diagnostics(row)['partial_measurements']
+        self.assertEqual(part['measurement_snapshot_error'], 'FINAL_RESOURCE_SNAPSHOT_FAILED')
+        self.assertNotIn('PRIVATE', printed.call_args.args[0])
+
+    def test_host_persists_partial_result_and_confirms_cleanup_on_worker_failure(self):
+        value = self.observation()
+        runtime = SimpleNamespace(DOCKER=['docker'], TARGET='fixed-target', TARGET_CONFIG='config',
+            TARGET_MANIFEST='manifest', command=Mock(), inspect_image=Mock(return_value={}),
+            cleanup=Mock(return_value=True))
+        inventory = SimpleNamespace(now=lambda: 'test', registry_identity=Mock(return_value={
+            'platform_manifest_digest': 'manifest', 'config_digest': 'config'}))
+        modules = dict(runtime_smoke=runtime, env_probe=inventory, build_container_probe=worker,
+            install_container_probe=installer, install_probe=install_host,
+            dependency_probe=dependency_host, dependency_container_probe=dependency,
+            source_container_probe=source)
+        original_stat = os.stat
+        def socket_stat(path, *args, **kwargs):
+            if path == '/var/run/docker.sock':
+                return SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=0)
+            return original_stat(path, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'result.json'
+            with patch.object(host, 'load', side_effect=modules.__getitem__), \
+                    patch.dict(os.environ, {'CIRCLECI': 'true', 'CIRCLE_BRANCH': host.BRANCH}), \
+                    patch.object(host.platform, 'system', return_value='Linux'), \
+                    patch.object(host.platform, 'machine', return_value='x86_64'), \
+                    patch.object(host.os, 'stat', side_effect=socket_stat), \
+                    patch.object(host.subprocess, 'run', return_value=SimpleNamespace(
+                        stdout=json.dumps(value), stderr='', returncode=3)) as docker, patch('builtins.print'):
+                result = host.main(['--output', str(target), '--allow-pull', '--allow-install',
+                    '--allow-ci416-replacements', '--allow-ruby-3412-build', '--ephemeral-ci'])
+            saved = json.loads(target.read_text())
+        self.assertEqual(result, 3)
+        self.assertEqual(saved['status'], 'INCOMPLETE')
+        self.assertIs(saved['cleanup_confirmed'], True)
+        self.assertIs(saved['phase1_complete'], False)
+        self.assertEqual(saved['failure']['partial_measurements']['resources'], value['resources'])
+        docker.assert_called_once()
+        runtime.cleanup.assert_called_once()
+
+
 class HostTests(unittest.TestCase):
     def success_fixture(self):
         names = ['configure-negative', 'configure', 'make', 'install', 'runtime']
@@ -266,7 +419,7 @@ class HostTests(unittest.TestCase):
             self.assertNotIn(option, argv)
         self.assertEqual(argv[argv.index('--memory') + 1], '2g')
         self.assertEqual(argv[argv.index('--memory-swap') + 1], '2g')
-        self.assertIn('RUBY_P1_BUILD_PROBE=r28', argv)
+        self.assertIn('RUBY_P1_BUILD_PROBE=r29', argv)
 
     def test_hash_checked_helpers_and_bundle_compile(self):
         for filename in host.HELPERS:
