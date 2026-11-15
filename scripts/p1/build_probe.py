@@ -18,7 +18,7 @@ import uuid
 ROOT = Path(__file__).resolve().parent
 BRANCH = 'plan/ruby-100-p1-env-r1'
 # Refreshed only when preparing a reviewed proposal, never at runtime.
-HELPERS = {'runtime_smoke.py': '450a33babab510d9d529e309cbfd0ea1a9d76ef4728f1e6190a6a0f41935ecc5', 'env_probe.py': '7773d3dfd2a9b4d9f77d1f45ad37c6ce2810752dafaebf57780fdd2089ef80b9', 'dependency_probe.py': '240c2304eb28c8d769cb6d5cfaf2ae964175e50339d9debf358e7331a8807018', 'dependency_container_probe.py': '2118deac29ca85c050e4cee8291b3a062f7d9646fe0c69739562794922904b1d', 'install_probe.py': 'e22b2ee47ba07e88260d1e5877d08acfdfdcaa030f2eea4f98ffb470ad273ab5', 'install_container_probe.py': 'a6e0acd458cc03ba90bccb552f735957681c73852f3e0d80cee4aac7ed2c9fd9', 'source_container_probe.py': 'd264f2d1cb6cfbaf7c8b4f9d8530e2e3586a99ec9abf8e73d12a48ab1dad35a8', 'build_container_probe.py': '440320dd8c0782e1bd07bae0374b1d58f25cc71dac634a3276e032610d4eb6b5'}
+HELPERS = {'runtime_smoke.py': '450a33babab510d9d529e309cbfd0ea1a9d76ef4728f1e6190a6a0f41935ecc5', 'env_probe.py': '7773d3dfd2a9b4d9f77d1f45ad37c6ce2810752dafaebf57780fdd2089ef80b9', 'dependency_probe.py': '240c2304eb28c8d769cb6d5cfaf2ae964175e50339d9debf358e7331a8807018', 'dependency_container_probe.py': '2118deac29ca85c050e4cee8291b3a062f7d9646fe0c69739562794922904b1d', 'install_probe.py': 'e22b2ee47ba07e88260d1e5877d08acfdfdcaa030f2eea4f98ffb470ad273ab5', 'install_container_probe.py': 'a6e0acd458cc03ba90bccb552f735957681c73852f3e0d80cee4aac7ed2c9fd9', 'source_container_probe.py': 'd264f2d1cb6cfbaf7c8b4f9d8530e2e3586a99ec9abf8e73d12a48ab1dad35a8', 'build_container_probe.py': '8d64c9642feab098c3b43238717f871ef1deabe7bcf668edfeff40fac2cc9b1e'}
 
 
 class Stop(Exception):
@@ -29,7 +29,7 @@ def load(name):
     path = ROOT / (name + '.py')
     if path.name not in HELPERS or hashlib.sha256(path.read_bytes()).hexdigest() != HELPERS[path.name]:
         raise Stop('HELPER_CHANGED')
-    spec = importlib.util.spec_from_file_location('r31_' + name, path)
+    spec = importlib.util.spec_from_file_location('r32_' + name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -45,7 +45,7 @@ def arguments(runtime, name, run_id):
     # /tmp stays on the disposable container layer; no 1 GiB RAM-backed build workspace.
     return result + ['--security-opt', 'no-new-privileges', '--no-healthcheck',
         '--pids-limit', '128', '--memory', '2g', '--memory-swap', '2g', '--cpus', '1',
-        '--env', 'RUBY_P1_BUILD_PROBE=r31', '--entrypoint', '/usr/bin/python3',
+        '--env', 'RUBY_P1_BUILD_PROBE=r32', '--entrypoint', '/usr/bin/python3',
         '-i', runtime.TARGET_CONFIG, '-I', '-B', '-']
 
 
@@ -54,7 +54,7 @@ def bundle(plan_text):
     for variable, name in (('_dependency', 'dependency_container_probe.py'),
                             ('_installer', 'install_container_probe.py'),
                             ('_source', 'source_container_probe.py')):
-        text += variable + ' = types.ModuleType(' + repr('r31' + variable) + ')\n'
+        text += variable + ' = types.ModuleType(' + repr('r32' + variable) + ')\n'
         text += 'exec(' + repr((ROOT / name).read_text()) + ', ' + variable + '.__dict__)\n'
     text += '_expected = json.loads(' + repr(plan_text) + ')\n'
     return text + (ROOT / 'build_container_probe.py').read_text()
@@ -64,13 +64,14 @@ def validate(value, expected, worker, installer, install_host, dependency_host, 
     if (type(value) is not dict or value.get('schema') != worker.SCHEMA
             or value.get('status') != worker.SUCCESS or value.get('stage') != 'finished'
             or value.get('condition') != {'ruby': worker.VERSION, 'prefix': worker.PREFIX,
-                'documentation': True, 'rust': False, 'make_jobs': 1}
+                'documentation': False, 'rust': False, 'make_jobs': 1}
             or value.get('configure_argv') != list(worker.CONFIGURE)
             or any(value.get(k) is not False for k in ('p1_04_complete', 'phase1_complete',
                    'role_verified', 'idempotence_verified', 'full_workspace_retained'))
             or any(value.get(k) is not True for k in ('ruby_build_verified', 'unknown_option_rejected',
                    'rust_absent_after_dependencies', 'public_commands_unchanged',
-                   'rpm_and_repo_state_unchanged_by_build', 'ci_container_cleanup_required'))
+                   'rpm_and_repo_state_unchanged_by_build', 'ci_container_cleanup_required',
+                   'default_prefix_absent'))
             or not install_host.number(value.get('elapsed_seconds'), 2310)):
         raise Stop('BUILD_WORKER_SCHEMA')
     install_host.validate(value['dependencies'], expected, installer, dependency_host, dependency)
@@ -93,18 +94,20 @@ def validate(value, expected, worker, installer, install_host, dependency_host, 
     if (settings.get('USE_YJIT') != 0 or settings.get('USE_ZJIT') != 0
             or settings.get('configure_summary_jit_disabled') is not True
             or settings.get('makefile_values') != {'prefix': worker.PREFIX, 'ENABLE_SHARED': 'yes',
-                'YJIT_SUPPORT': 'no', 'ZJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
-                'INSTALLDOC': 'all', 'EXTOUT': '.ext'}):
+                'YJIT_SUPPORT': 'no', 'ZJIT_SUPPORT': 'no', 'DOCTARGETS': 'nodoc nodoc',
+                'INSTALLDOC': 'nodoc', 'EXTOUT': '.ext'}):
         raise Stop('BUILD_SETTING_SCHEMA')
     docs = value['documentation']
-    if (type(docs) is not dict or any(docs.get(k) is not True for k in
-            ('enabled', 'standard_String_verified', 'other_stores_disabled', 'installed_help_verified'))
-            or docs != {'enabled': True, 'system_dir': worker.PREFIX + '/share/ri/4.0.0/system',
-                'standard_String_verified': True, 'other_stores_disabled': True,
-                'formatter': 'rdoc', 'installed_help_verified': True}):
+    if (type(docs) is not dict or docs.get('enabled') is not False
+            or docs.get('system_store_absent') is not True
+            or docs.get('standard_lookup_performed') is not False
+            or docs != {'enabled': False, 'system_dir': worker.PREFIX + '/share/ri/4.0.0/system',
+                'system_store_absent': True,
+                'generated_outputs_absent': ['.ext/rdoc', '.ext/html', 'doc/capi'],
+                'standard_lookup_performed': False}):
         raise Stop('BUILD_DOCUMENTATION_SCHEMA')
     names = ['configure-negative', 'configure', 'make', 'install', 'runtime']
-    names += ['command-' + n for n in worker.COMMANDS] + ['ri-help', 'ri-String']
+    names += ['command-' + n for n in worker.COMMANDS]
     runs = value.get('runs')
     if type(runs) is not list or [r.get('name') for r in runs] != names:
         raise Stop('BUILD_RUNS_SCHEMA')
@@ -158,14 +161,14 @@ def partial_measurements(value):
 
 def diagnostics(value):
     """Bounded, credential-free container logs; never dump host environment or exceptions."""
-    if type(value) is not dict or value.get('schema') != 'ruby-p1-build-container-r31':
+    if type(value) is not dict or value.get('schema') != 'ruby-p1-build-container-r32':
         return {'reason': 'UNREADABLE_WORKER_RESULT'}
     result = {}
     for key in ('stage', 'reason', 'error_type'):
         item = value.get(key)
         if type(item) is str and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', item):
             result[key] = item
-    if type(value.get('runs')) is list and len(value['runs']) <= 16:
+    if type(value.get('runs')) is list and len(value['runs']) <= 14:
         result['runs'] = []
         for row in value['runs']:
             if (type(row) is dict and type(row.get('name')) is str
@@ -181,11 +184,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
     for flag in ('allow-pull', 'allow-install', 'allow-ci416-replacements',
-                 'allow-ruby-409-docs-on-build', 'ephemeral-ci'):
+                 'allow-ruby-409-docs-off-build', 'ephemeral-ci'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
     if (not all((args.allow_pull, args.allow_install, args.allow_ci416_replacements,
-                 args.allow_ruby_409_docs_on_build, args.ephemeral_ci))
+                 args.allow_ruby_409_docs_off_build, args.ephemeral_ci))
             or os.environ.get('CIRCLECI') != 'true' or os.environ.get('CIRCLE_BRANCH') != BRANCH
             or platform.system() != 'Linux' or platform.machine() != 'x86_64'):
         print('STOP: EXPLICIT_EPHEMERAL_RUBY_BUILD_APPROVAL_REQUIRED')
@@ -195,11 +198,11 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-build-run-r31', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-build-run-r32', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_04_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     possible, runtime = False, None
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-build-r31'
+    name = 'ruby-p1-' + run_id + '-build-r32'
     handlers = {}
     try:
         def interrupted(_sig, _frame):
@@ -266,7 +269,7 @@ def main(argv=None):
             json.dump(report, output, sort_keys=True, indent=2)
             output.write('\n')
     print(report['status'])
-    return 0 if report['status'] == 'RUBY_409_DOCS_ON_BUILD_VERIFIED' else 3
+    return 0 if report['status'] == 'RUBY_409_DOCS_OFF_CUSTOM_PREFIX_BUILD_VERIFIED' else 3
 
 
 if __name__ == '__main__':
