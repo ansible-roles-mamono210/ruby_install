@@ -7,6 +7,10 @@ orbs:
   yamllint: orbss/yamllint@0.0.4
 
 parameters:
+  run_p1_build_probe:
+    type: boolean
+    default: false
+
   run_p1_env_probe:
     type: boolean
     default: false
@@ -44,6 +48,32 @@ parameters:
     default: small
 
 jobs:
+  p1-ruby-build:
+    machine:
+      image: ubuntu-2204:2023.10.1
+    resource_class: medium
+    steps:
+      - checkout
+      - run:
+          name: Evaluate Ruby 3.4.12 with standard documentation in one disposable target
+          no_output_timeout: 45m
+          command: |
+            set -euo pipefail
+            umask 077
+            mkdir -p p1-evidence
+            set +e
+            timeout --signal=TERM --kill-after=60s 44m \
+              python3 scripts/p1/build_probe.py \
+              --allow-pull --ephemeral-ci --allow-install --allow-ci416-replacements \
+              --allow-ruby-3412-build --output p1-evidence/environment.json
+            p1_probe_rc=$?
+            set -e
+            printf '%s\n' "$p1_probe_rc" > p1-evidence/exit-code.txt
+            exit "$p1_probe_rc"
+      - store_artifacts:
+          path: p1-evidence
+          destination: p1-ruby-build
+
   p1-environment:
     machine:
       image: ubuntu-2204:2023.10.1
@@ -145,16 +175,26 @@ jobs:
 
 workflows:
   version: 2.1
+  p1-ruby-build-measurement:
+    when:
+      and:
+        - << pipeline.parameters.run_p1_build_probe >>
+        - not: << pipeline.parameters.run_p1_env_probe >>
+        - equal: [plan/ruby-100-p1-env-r1, << pipeline.git.branch >>]
+    jobs:
+      - p1-ruby-build
   p1-environment-measurement:
     when:
       and:
         - << pipeline.parameters.run_p1_env_probe >>
+        - not: << pipeline.parameters.run_p1_build_probe >>
         - equal: [plan/ruby-100-p1-env-r1, << pipeline.git.branch >>]
     jobs:
       - p1-environment
   build:
     when:
       and:
+        - not: << pipeline.parameters.run_p1_build_probe >>
         - not: << pipeline.parameters.run_p1_env_probe >>
         - not:
             equal: [plan/ruby-100-p1-env-r1, << pipeline.git.branch >>]

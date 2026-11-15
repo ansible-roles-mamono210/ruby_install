@@ -1050,6 +1050,7 @@ class HostTests(unittest.TestCase):
         workflow = config['workflows']['p1-environment-measurement']
         self.assertEqual(workflow['jobs'], ['p1-environment'])
         self.assertEqual(workflow['when']['and'], ['<< pipeline.parameters.run_p1_env_probe >>',
+                         {'not': '<< pipeline.parameters.run_p1_build_probe >>'},
                          {'equal': [h.BRANCH, '<< pipeline.git.branch >>']}])
         job = config['jobs']['p1-environment']
         self.assertEqual(job['machine']['image'], 'ubuntu-2204:2023.10.1')
