@@ -51,16 +51,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Resolve Ruby build dependencies without installing packages
-          no_output_timeout: 17m
+          name: Install CI416 dependency plan in a disposable target and check build readiness
+          no_output_timeout: 23m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
-            timeout --signal=TERM --kill-after=30s 16m \
-              python3 scripts/p1/dependency_probe.py \
-              --allow-pull --ephemeral-ci --allow-repo-metadata --allow-solver \
+            timeout --signal=TERM --kill-after=30s 22m \
+              python3 scripts/p1/install_probe.py \
+              --allow-pull --ephemeral-ci --allow-install --allow-ci416-replacements \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
