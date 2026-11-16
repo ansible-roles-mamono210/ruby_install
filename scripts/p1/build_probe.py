@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host boundary for one explicitly approved Ruby 3.4.12 with Rust present evaluation build."""
+"""Host boundary for one explicitly approved Ruby 4.0.9 with Rust present evaluation build."""
 import argparse
 import hashlib
 import importlib.util
@@ -18,7 +18,7 @@ import uuid
 ROOT = Path(__file__).resolve().parent
 BRANCH = 'plan/ruby-100-p1-env-r1'
 # Refreshed only when preparing a reviewed proposal, never at runtime.
-HELPERS = {'runtime_smoke.py': '450a33babab510d9d529e309cbfd0ea1a9d76ef4728f1e6190a6a0f41935ecc5', 'env_probe.py': '7773d3dfd2a9b4d9f77d1f45ad37c6ce2810752dafaebf57780fdd2089ef80b9', 'dependency_probe.py': '240c2304eb28c8d769cb6d5cfaf2ae964175e50339d9debf358e7331a8807018', 'dependency_container_probe.py': '2118deac29ca85c050e4cee8291b3a062f7d9646fe0c69739562794922904b1d', 'install_probe.py': 'e22b2ee47ba07e88260d1e5877d08acfdfdcaa030f2eea4f98ffb470ad273ab5', 'install_container_probe.py': 'a6e0acd458cc03ba90bccb552f735957681c73852f3e0d80cee4aac7ed2c9fd9', 'source_container_probe.py': 'd264f2d1cb6cfbaf7c8b4f9d8530e2e3586a99ec9abf8e73d12a48ab1dad35a8', 'build_container_probe.py': '0dcb5ce635b2998c0d5081ea1b638150fd5526058037559d3b161205cbf6b7a5', 'rust_install_probe.py': '2074e1cb3cd9ad2b0295e7acef7a88beaba9dddf0da6bb847fc5683e103835a6', 'rust_install_container_probe.py': 'de4dd9186d6da8ca69ae821aab5169e637b17c130d9e8d104f76a9fe589c2a0a'}
+HELPERS = {'runtime_smoke.py': '450a33babab510d9d529e309cbfd0ea1a9d76ef4728f1e6190a6a0f41935ecc5', 'env_probe.py': '7773d3dfd2a9b4d9f77d1f45ad37c6ce2810752dafaebf57780fdd2089ef80b9', 'dependency_probe.py': '240c2304eb28c8d769cb6d5cfaf2ae964175e50339d9debf358e7331a8807018', 'dependency_container_probe.py': '2118deac29ca85c050e4cee8291b3a062f7d9646fe0c69739562794922904b1d', 'install_probe.py': 'e22b2ee47ba07e88260d1e5877d08acfdfdcaa030f2eea4f98ffb470ad273ab5', 'install_container_probe.py': 'a6e0acd458cc03ba90bccb552f735957681c73852f3e0d80cee4aac7ed2c9fd9', 'source_container_probe.py': 'd264f2d1cb6cfbaf7c8b4f9d8530e2e3586a99ec9abf8e73d12a48ab1dad35a8', 'build_container_probe.py': '848e50293bca725d7ee82dcacb9eebc57e77675b9ca374befe606f8aa98f66f6', 'rust_install_probe.py': '2074e1cb3cd9ad2b0295e7acef7a88beaba9dddf0da6bb847fc5683e103835a6', 'rust_install_container_probe.py': 'de4dd9186d6da8ca69ae821aab5169e637b17c130d9e8d104f76a9fe589c2a0a'}
 
 
 class Stop(Exception):
@@ -29,7 +29,7 @@ def load(name):
     path = ROOT / (name + '.py')
     if path.name not in HELPERS or hashlib.sha256(path.read_bytes()).hexdigest() != HELPERS[path.name]:
         raise Stop('HELPER_CHANGED')
-    spec = importlib.util.spec_from_file_location('r35_' + name, path)
+    spec = importlib.util.spec_from_file_location('r36_' + name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -45,7 +45,7 @@ def arguments(runtime, name, run_id):
     # /tmp stays on the disposable container layer; no 1 GiB RAM-backed build workspace.
     return result + ['--security-opt', 'no-new-privileges', '--no-healthcheck',
         '--pids-limit', '128', '--memory', '2g', '--memory-swap', '2g', '--cpus', '1',
-        '--env', 'RUBY_P1_BUILD_PROBE=r35', '--entrypoint', '/usr/bin/python3',
+        '--env', 'RUBY_P1_BUILD_PROBE=r36', '--entrypoint', '/usr/bin/python3',
         '-i', runtime.TARGET_CONFIG, '-I', '-B', '-']
 
 
@@ -55,7 +55,7 @@ def bundle(plan_text):
                             ('_installer', 'install_container_probe.py'),
                             ('_source', 'source_container_probe.py'),
                             ('_rust_worker', 'rust_install_container_probe.py')):
-        text += variable + ' = types.ModuleType(' + repr('r35' + variable) + ')\n'
+        text += variable + ' = types.ModuleType(' + repr('r36' + variable) + ')\n'
         text += 'exec(' + repr((ROOT / name).read_text()) + ', ' + variable + '.__dict__)\n'
     text += '_dependency.PACKAGES = ' + repr(load('rust_install_probe').PACKAGES) + '\n'
     text += '_expected = json.loads(' + repr(plan_text) + ')\n'
@@ -99,17 +99,17 @@ def validate(value, expected, worker, installer, install_host, dependency_host, 
                                   for n in worker.COMMANDS]):
         raise Stop('BUILD_COMMAND_SCHEMA')
     settings = value['build_settings']
-    if (settings.get('USE_YJIT') != 0 or settings.get('USE_RJIT') != 0
+    if (settings.get('USE_YJIT') != 0 or settings.get('USE_ZJIT') != 0
             or settings.get('configure_summary_jit_disabled') is not True
             or settings.get('makefile_values') != {'prefix': worker.PREFIX, 'ENABLE_SHARED': 'yes',
-                'YJIT_SUPPORT': 'no', 'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
+                'YJIT_SUPPORT': 'no', 'ZJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
                 'INSTALLDOC': 'all', 'EXTOUT': '.ext'}):
         raise Stop('BUILD_SETTING_SCHEMA')
     docs = value['documentation']
     if (type(docs) is not dict or docs.get('enabled') is not True
             or docs.get('standard_String_verified') is not True
             or docs.get('other_stores_disabled') is not True
-            or docs != {'enabled': True, 'system_dir': worker.PREFIX + '/share/ri/3.4.0/system',
+            or docs != {'enabled': True, 'system_dir': worker.PREFIX + '/share/ri/4.0.0/system',
                         'standard_String_verified': True, 'other_stores_disabled': True}):
         raise Stop('BUILD_DOCUMENTATION_SCHEMA')
     names = ['configure-negative', 'configure', 'make', 'install', 'runtime']
@@ -128,6 +128,21 @@ def validate(value, expected, worker, installer, install_host, dependency_host, 
     if (type(value.get('resources')) is not dict or value['resources'].get('sample_count', 0) <= 0
             or value.get('prefix_size', {}).get('allocated_bytes', 0) <= 0):
         raise Stop('BUILD_RESOURCE_SCHEMA')
+    resources = value['resources']
+    if ('memory_events' not in resources or (resources['memory_events'] is not None and
+            checked_memory_events(resources['memory_events']) is None)):
+        raise Stop('BUILD_MEMORY_EVENTS_SCHEMA')
+
+
+def checked_memory_events(value):
+    required = {'low', 'high', 'max', 'oom', 'oom_kill'}
+    if (type(value) is dict and set(value) == {'source', 'counters'} and
+            value['source'] in ('/sys/fs/cgroup/memory.events.local', '/sys/fs/cgroup/memory.events') and
+            type(value['counters']) is dict and
+            required <= set(value['counters']) <= required | {'oom_group_kill'} and
+            all(type(n) is int and 0 <= n <= 2 ** 63 - 1 for n in value['counters'].values())):
+        return {'source': value['source'], 'counters': dict(value['counters'])}
+    return None
 
 
 def partial_measurements(value):
@@ -152,6 +167,10 @@ def partial_measurements(value):
         if type(origin) is str and origin in ('unavailable', '/sys/fs/cgroup/memory.peak',
                                              '/sys/fs/cgroup/memory/memory.max_usage_in_bytes'):
             kept['memory_peak_source'] = origin
+        if 'memory_events' in resources:
+            events = checked_memory_events(resources['memory_events'])
+            if resources['memory_events'] is None or events is not None:
+                kept['memory_events'] = events
         if kept:
             result['resources'] = kept
     size = value.get('prefix_size')
@@ -167,7 +186,7 @@ def partial_measurements(value):
 
 def diagnostics(value):
     """Bounded, credential-free container logs; never dump host environment or exceptions."""
-    if type(value) is not dict or value.get('schema') != 'ruby-p1-build-container-r35':
+    if type(value) is not dict or value.get('schema') != 'ruby-p1-build-container-r36':
         return {'reason': 'UNREADABLE_WORKER_RESULT'}
     result = {}
     for key in ('stage', 'reason', 'error_type'):
@@ -190,11 +209,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
     for flag in ('allow-pull', 'allow-install', 'allow-ci430-replacements',
-                 'allow-ruby-3412-rust-build', 'allow-rust-install', 'ephemeral-ci'):
+                 'allow-ruby-409-rust-build', 'allow-rust-install', 'ephemeral-ci'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
     if (not all((args.allow_pull, args.allow_install, args.allow_ci430_replacements,
-                 args.allow_ruby_3412_rust_build, args.allow_rust_install, args.ephemeral_ci))
+                 args.allow_ruby_409_rust_build, args.allow_rust_install, args.ephemeral_ci))
             or os.environ.get('CIRCLECI') != 'true' or os.environ.get('CIRCLE_BRANCH') != BRANCH
             or platform.system() != 'Linux' or platform.machine() != 'x86_64'):
         print('STOP: EXPLICIT_EPHEMERAL_RUBY_BUILD_APPROVAL_REQUIRED')
@@ -204,11 +223,11 @@ def main(argv=None):
     except OSError:
         print('STOP: OUTPUT_UNAVAILABLE_OR_EXISTS')
         return 3
-    report = {'schema': 'ruby-p1-build-run-r35', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-build-run-r36', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'p1_04_complete': False, 'phase1_complete': False, 'cleanup_confirmed': None}
     possible, runtime = False, None
     run_id = uuid.uuid4().hex
-    name = 'ruby-p1-' + run_id + '-build-r35'
+    name = 'ruby-p1-' + run_id + '-build-r36'
     handlers = {}
     try:
         def interrupted(_sig, _frame):
@@ -276,7 +295,7 @@ def main(argv=None):
             json.dump(report, output, sort_keys=True, indent=2)
             output.write('\n')
     print(report['status'])
-    return 0 if report['status'] == 'RUBY_3412_DOCS_ON_RUST_PRESENT_BUILD_VERIFIED' else 3
+    return 0 if report['status'] == 'RUBY_409_DOCS_ON_RUST_PRESENT_BUILD_VERIFIED' else 3
 
 
 if __name__ == '__main__':

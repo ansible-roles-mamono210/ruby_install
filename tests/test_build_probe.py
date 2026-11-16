@@ -1,4 +1,4 @@
-"""Offline boundary tests for r35; these are not Ruby build or CI results."""
+"""Offline boundary tests for r36; these are not Ruby build or CI results."""
 import copy
 import gzip
 import hashlib
@@ -31,15 +31,19 @@ dependency_host = module('dependency_probe')
 
 
 def valid_entries():
-    return copy.deepcopy(archive_entries())
+    items = copy.deepcopy(archive_entries())
+    for member, _ in items:
+        member.name = member.name.replace('ruby-3.4.12', 'ruby-4.0.9')
+        member.linkname = member.linkname.replace('ruby-3.4.12', 'ruby-4.0.9')
+    return items
 
 
 def runtime_fixture():
-    return {'version': '3.4.12', 'ruby': '/opt/ruby/bin/ruby', 'prefix': '/opt/ruby',
-            'shared': 'yes', 'yjit_build': 'no', 'rjit_build': 'no',
-            'jit': {'YJIT': False, 'RJIT': 'absent'},
-            'shared_libraries': ['/opt/ruby/lib/libruby.so.3.4.12'],
-            'ri_system': '/opt/ruby/share/ri/3.4.0/system',
+    return {'version': '4.0.9', 'ruby': '/opt/ruby/bin/ruby', 'prefix': '/opt/ruby',
+            'shared': 'yes', 'yjit_build': 'no', 'zjit_build': 'no',
+            'jit': {'YJIT': False, 'ZJIT': 'absent'},
+            'shared_libraries': ['/opt/ruby/lib/libruby.so.4.0.9'],
+            'ri_system': '/opt/ruby/share/ri/4.0.0/system',
             'extensions': dict(openssl='test', psych='test', zlib='test', fiddle='test')}
 
 
@@ -64,9 +68,9 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(len(self.attempt()), 3)
 
     def test_contained_hardlink_and_symlink(self):
-        entries = valid_entries() + [entry('ruby-3.4.12/hard', kind=tarfile.LNKTYPE,
-                                         target='ruby-3.4.12/configure'),
-                                     entry('ruby-3.4.12/soft', kind=tarfile.SYMTYPE, target='configure')]
+        entries = valid_entries() + [entry('ruby-4.0.9/hard', kind=tarfile.LNKTYPE,
+                                         target='ruby-4.0.9/configure'),
+                                     entry('ruby-4.0.9/soft', kind=tarfile.SYMTYPE, target='configure')]
         self.assertIn(('soft', True), self.attempt(entries))
 
     def test_checksum_change_stops_before_extraction(self):
@@ -78,9 +82,9 @@ class ExtractionTests(unittest.TestCase):
             self.attempt(mutate_audit=lambda a: a.update(members=999))
 
     def test_escape_and_link_parent_rejected(self):
-        for entries in (valid_entries() + [entry('ruby-3.4.12/../outside')],
-                        valid_entries() + [entry('ruby-3.4.12/evil', kind=tarfile.SYMTYPE, target='/tmp'),
-                                           entry('ruby-3.4.12/evil/file')]):
+        for entries in (valid_entries() + [entry('ruby-4.0.9/../outside')],
+                        valid_entries() + [entry('ruby-4.0.9/evil', kind=tarfile.SYMTYPE, target='/tmp'),
+                                           entry('ruby-4.0.9/evil/file')]):
             with self.subTest(entries=entries[-1][0].name), self.assertRaises(source.Stop):
                 self.attempt(entries)
 
@@ -126,20 +130,20 @@ class SettingsTests(unittest.TestCase):
     def make_settings(self, directory, yjit=0, docs='rdoc nodoc'):
         root = Path(directory)
         (root / 'Makefile').write_text('prefix = /opt/ruby\nENABLE_SHARED = yes\n'
-            'YJIT_SUPPORT=no\nRJIT_SUPPORT = no\nDOCTARGETS = ' + docs +
+            'YJIT_SUPPORT=no\nZJIT_SUPPORT = no\nDOCTARGETS = ' + docs +
             '\nINSTALLDOC = all\nEXTOUT = .ext\n')
         header = root / '.ext/include/x86_64-linux/ruby/config.h'
         header.parent.mkdir(parents=True)
-        header.write_text('#define USE_YJIT ' + str(yjit) + '\n#define USE_RJIT 0\n')
+        header.write_text('#define USE_YJIT ' + str(yjit) + '\n#define USE_ZJIT 0\n')
         log = root / 'configure.log'
-        log.write_text('   * YJIT support:        no\n   * RJIT support:        no\n'
+        log.write_text('   * YJIT support:        no\n   * ZJIT support:        no\n'
                        '   * install doc:         rdoc\n')
         return log
 
     def test_summary_makefile_header_agree(self):
         with tempfile.TemporaryDirectory() as directory:
             result = worker.build_settings(Path(directory), self.make_settings(directory))
-        self.assertEqual(result['USE_RJIT'], 0)
+        self.assertEqual(result['USE_ZJIT'], 0)
 
     def test_enabled_macro_fails_even_with_disabled_summary(self):
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(worker.Stop, 'JIT_BUILD_ENABLED'):
@@ -154,8 +158,8 @@ class SettingsTests(unittest.TestCase):
 
     def test_runtime_wrong_ruby_or_external_shared_library(self):
         for key, value in (('version', '3.2.3'), ('prefix', '/usr/local'), ('ruby', '/usr/bin/ruby'),
-                           ('shared_libraries', ['/usr/lib/libruby.so']), ('rjit_build', 'yes'),
-                           ('jit', {'YJIT': True, 'RJIT': False})):
+                           ('shared_libraries', ['/usr/lib/libruby.so']), ('zjit_build', 'yes'),
+                           ('jit', {'YJIT': True, 'ZJIT': False})):
             row = runtime_fixture()
             row[key] = value
             with self.subTest(key=key), self.assertRaises(worker.Stop):
@@ -193,13 +197,13 @@ class DocumentationRegressionTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(text.encode()).hexdigest(),
                          '0d6c293c7f63e9f6ecc547ab5ee462ea90091642c257f4ab3c33d39690bb39e8')
         formats = re.search(r'Valid formatters are:\s+([^\n]+)\.', text)[1].split(', ')
-        argv = worker.documentation_arguments('/opt/ruby/share/ri/3.4.0/system')
+        argv = worker.documentation_arguments('/opt/ruby/share/ri/4.0.0/system')
         selected = next(arg.split('=', 1)[1] for arg in argv if arg.startswith('--format='))
         self.assertIn(selected, formats)
         self.assertNotIn('plain', formats)  # The failure seen in the real CI run.
 
     def test_documentation_lookup_keeps_only_the_requested_store(self):
-        docs = '/opt/ruby/share/ri/3.4.0/system'
+        docs = '/opt/ruby/share/ri/4.0.0/system'
         argv = worker.documentation_arguments(docs)
         self.assertEqual(argv[0], '/opt/ruby/bin/ri')
         self.assertEqual([arg for arg in argv if arg.startswith('--doc-dir=')], ['--doc-dir=' + docs])
@@ -210,14 +214,14 @@ class DocumentationRegressionTests(unittest.TestCase):
             self.assertNotIn(extra_store, argv)
 
 
-class Ruby3412RustPresentTests(unittest.TestCase):
+class Ruby409RustPresentTests(unittest.TestCase):
     def validate(self, row):
         host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
 
     def test_jit_disabled_with_documentation_and_default_prefix(self):
-        self.assertEqual(worker.VERSION, '3.4.12')
+        self.assertEqual(worker.VERSION, '4.0.9')
         self.assertEqual(worker.PREFIX, '/opt/ruby')
-        for option in ('--prefix=/opt/ruby', '--disable-yjit', '--disable-rjit',
+        for option in ('--prefix=/opt/ruby', '--disable-yjit', '--disable-zjit',
                        '--enable-install-doc', '--enable-install-rdoc', '--disable-install-capi'):
             self.assertIn(option, worker.CONFIGURE)
         self.assertNotIn('--disable-install-doc', worker.CONFIGURE)
@@ -241,7 +245,7 @@ class Ruby3412RustPresentTests(unittest.TestCase):
 
     def test_standard_documentation_lookup_is_required(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(worker, 'PREFIX', directory):
-            docs = Path(directory) / 'share/ri/3.4.0/system'
+            docs = Path(directory) / 'share/ri/4.0.0/system'
             (docs / 'String').mkdir(parents=True)
             (docs / 'String/cdesc-String.ri').write_bytes(b'fixture')
             log = Path(directory) / 'ri.log';log.write_text('String' * 100)
@@ -252,7 +256,7 @@ class Ruby3412RustPresentTests(unittest.TestCase):
 
     def test_missing_or_external_documentation_stops_before_lookup(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(worker, 'PREFIX', directory):
-            for docs in (directory + '/share/ri/3.4.0/system', '/elsewhere'):
+            for docs in (directory + '/share/ri/4.0.0/system', '/elsewhere'):
                 with self.subTest(path=docs), patch.object(worker, 'run') as run, \
                         self.assertRaisesRegex(worker.Stop, 'STANDARD_DOCUMENTATION_MISSING'):
                     worker.documentation_on({'ri_system': docs}, directory, {}, Mock(), 100)
@@ -260,7 +264,7 @@ class Ruby3412RustPresentTests(unittest.TestCase):
 
     def test_wrong_ri_output_rejected(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(worker, 'PREFIX', directory):
-            docs = Path(directory) / 'share/ri/3.4.0/system'
+            docs = Path(directory) / 'share/ri/4.0.0/system'
             (docs / 'String').mkdir(parents=True);(docs / 'String/cdesc-String.ri').touch()
             log = Path(directory) / 'ri.log';log.write_text('x' * 200)
             with patch.object(worker, 'run', return_value=log), \
@@ -275,7 +279,7 @@ class Ruby3412RustPresentTests(unittest.TestCase):
 
     def test_host_requires_rust_present_docs_on_condition(self):
         base = HostTests().success_fixture()
-        for change in ({'ruby': '4.0.9'}, {'rust': False}, {'documentation': False}, {'prefix': '/other'}):
+        for change in ({'ruby': '3.4.12'}, {'rust': False}, {'documentation': False}, {'prefix': '/other'}):
             with self.subTest(change=change), self.assertRaises(host.Stop):
                 self.validate(dict(base, condition=dict(base['condition'], **change)))
         with self.assertRaises(host.Stop):
@@ -296,12 +300,12 @@ class Ruby3412RustPresentTests(unittest.TestCase):
             else:row['runs'][-1]['returncode'] = 1
             with self.subTest(mode=mode), self.assertRaises(host.Stop):self.validate(row)
 
-    def test_source_selects_exact_ruby3412_tuple(self):
-        self.assertEqual(worker.source_spec(source), source.SOURCES[0])
+    def test_source_selects_exact_ruby409_tuple(self):
+        self.assertEqual(worker.source_spec(source), source.SOURCES[1])
 
     def test_source_drift_stops_before_network(self):
-        fixed = source.SOURCES[0]
-        for items, hostname in ((source.SOURCES[1:], source.HOST), ((fixed, fixed), source.HOST),
+        fixed = source.SOURCES[1]
+        for items, hostname in ((source.SOURCES[:1], source.HOST), ((fixed, fixed), source.HOST),
                 (((fixed[0], '/different', fixed[2]),), source.HOST),
                 (((fixed[0], fixed[1], '0' * 64),), source.HOST), ((fixed,), 'elsewhere.invalid')):
             with self.subTest(items=items), patch.object(worker.http.client, 'HTTPSConnection') as network, \
@@ -309,27 +313,27 @@ class Ruby3412RustPresentTests(unittest.TestCase):
                 worker.download(SimpleNamespace(SOURCES=items, HOST=hostname), '/unused', {})
             network.assert_not_called()
 
-    def test_rjit_header_summary_and_runtime_must_be_disabled(self):
+    def test_zjit_header_summary_and_runtime_must_be_disabled(self):
         for location in ('header', 'summary'):
             with self.subTest(location=location), tempfile.TemporaryDirectory() as directory:
                 log = SettingsTests().make_settings(directory)
                 target = log if location == 'summary' else next(Path(directory).glob('.ext/include/*/ruby/config.h'))
-                target.write_text(target.read_text().replace('USE_RJIT 0', 'USE_RJIT 1') if location == 'header'
-                                  else target.read_text().replace('RJIT support:        no', 'RJIT support:        yes'))
+                target.write_text(target.read_text().replace('USE_ZJIT 0', 'USE_ZJIT 1') if location == 'header'
+                                  else target.read_text().replace('ZJIT support:        no', 'ZJIT support:        yes'))
                 with self.assertRaises(worker.Stop):worker.build_settings(Path(directory), log)
-        row = runtime_fixture();row['jit'] = {'YJIT': False, 'ZJIT': False}
+        row = runtime_fixture();row['jit'] = {'YJIT': False, 'RJIT': False}
         with self.assertRaisesRegex(worker.Stop, 'RUNTIME_JIT'):worker.validate_runtime(row)
 
     def test_ci_requires_new_build_and_rust_flags(self):
         config = yaml.safe_load((host.ROOT.parents[1] / '.circleci/config.yml').read_text())
         command = config['jobs']['p1-ruby-build']['steps'][1]['run']['command']
-        for flag in ('--allow-ruby-3412-rust-build', '--allow-rust-install', '--allow-ci430-replacements'):
+        for flag in ('--allow-ruby-409-rust-build', '--allow-rust-install', '--allow-ci430-replacements'):
             self.assertIn(flag, command)
         self.assertNotIn('--allow-ci416-replacements', command)
 
     def test_each_required_flag_is_checked_before_any_output_or_docker(self):
-        flags = ['--allow-pull', '--allow-install', '--allow-rust-install',
-                 '--allow-rust-install', '--allow-ci430-replacements', '--allow-ruby-3412-rust-build', '--ephemeral-ci']
+        flags = ['--allow-pull', '--allow-install',
+                 '--allow-rust-install', '--allow-ci430-replacements', '--allow-ruby-409-rust-build', '--ephemeral-ci']
         for missing in flags:
             with self.subTest(missing=missing), patch.object(host.os, 'open') as output, \
                     patch.object(host.subprocess, 'run') as run, patch('builtins.print'):
@@ -338,7 +342,8 @@ class Ruby3412RustPresentTests(unittest.TestCase):
 
     def test_old_flags_cannot_authorize_this_condition(self):
         for old in ('--allow-ruby-409-docs-off-build', '--allow-ruby-409-docs-on-build',
-                    '--allow-ruby-3412-docs-off-build', '--allow-ruby-3412-build', '--allow-ci416-replacements'):
+                    '--allow-ruby-3412-docs-off-build', '--allow-ruby-3412-build',
+                    '--allow-ruby-3412-rust-build', '--allow-ci416-replacements'):
             with self.subTest(flag=old), patch.object(host.os, 'open') as output, \
                     patch.object(host.subprocess, 'run') as run, patch('sys.stderr', io.StringIO()):
                 with self.assertRaises(SystemExit):host.main(['--output', '/unused', old])
@@ -390,7 +395,7 @@ class Ruby3412RustPresentTests(unittest.TestCase):
                 self.validate(dict(base,condition=dict(base['condition'],**change)))
 
     def test_existing_prefix_stops_before_workspace_or_dependencies(self):
-        with patch.dict(worker.os.environ, {'RUBY_P1_BUILD_PROBE':'r35'}, clear=True), \
+        with patch.dict(worker.os.environ, {'RUBY_P1_BUILD_PROBE':'r36'}, clear=True), \
                 patch.object(worker.os,'getuid',return_value=0), \
                 patch.object(worker.platform,'system',return_value='Linux'), \
                 patch.object(worker.platform,'machine',return_value='x86_64'), \
@@ -407,6 +412,85 @@ class Ruby3412RustPresentTests(unittest.TestCase):
         row=HostTests().success_fixture()
         self.assertEqual(len(row['runs']),15)
         self.assertEqual(host.diagnostics(row)['runs'][-1]['name'],'ri-String')
+
+
+class MemoryEventTests(unittest.TestCase):
+    TEXT = 'low 0\nhigh 0\nmax 17\noom 2\noom_kill 1\noom_group_kill 0\n'
+
+    def record(self):
+        return {'source': '/sys/fs/cgroup/memory.events.local',
+                'counters': {'low': 0, 'high': 0, 'max': 17, 'oom': 2,
+                             'oom_kill': 1, 'oom_group_kill': 0}}
+
+    def test_local_counters_preferred_and_nonzero_values_preserved(self):
+        with patch.object(worker.Path, 'open', return_value=io.StringIO(self.TEXT)) as opened:
+            self.assertEqual(worker.memory_events_snapshot(), self.record())
+        opened.assert_called_once_with('r', encoding='ascii')
+
+    def test_hierarchical_fallback_is_explicit(self):
+        with patch.object(worker.Path, 'open', side_effect=[FileNotFoundError(), io.StringIO(self.TEXT)]) as opened:
+            row = worker.memory_events_snapshot()
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(row, dict(self.record(), source='/sys/fs/cgroup/memory.events'))
+
+    def test_missing_unreadable_and_invalid_unicode_are_not_zero(self):
+        for failure in (FileNotFoundError(), PermissionError('PRIVATE'), UnicodeError('PRIVATE')):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(worker.Path, 'open', side_effect=failure):
+                self.assertIsNone(worker.memory_events_snapshot())
+
+    def test_unknown_fields_are_excluded_and_optional_counter_may_be_missing(self):
+        text = self.TEXT.replace('oom_group_kill 0\n', '') + 'future 9\nsecret PRIVATE\n'
+        with patch.object(worker.Path, 'open', return_value=io.StringIO(text)):
+            value = worker.memory_events_snapshot()
+        expected = self.record();del expected['counters']['oom_group_kill']
+        self.assertEqual(value, expected)
+        self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_malformed_duplicate_missing_and_oversized_inputs_are_unavailable(self):
+        texts = [self.TEXT + 'max 99\n', self.TEXT.replace('max 17\n', ''),
+                 self.TEXT + 'x' * 8193]
+        texts += [self.TEXT.replace('max 17', 'max ' + value)
+                  for value in ('-1', '1.5', 'true', '1 2', str(2 ** 63), '1' * 20)]
+        for text in texts:
+            with self.subTest(text=text[:100]), patch.object(worker.Path, 'open', return_value=io.StringIO(text)):
+                self.assertIsNone(worker.memory_events_snapshot())
+
+    def test_snapshot_survives_later_disk_sampling_failure(self):
+        with patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=10 ** 10)):
+            meter = worker.Meter('/unused')
+        with patch.object(worker, 'memory_events_snapshot', return_value=self.record()), \
+                patch.object(worker, 'size_tree', side_effect=OSError('PRIVATE')), self.assertRaises(OSError):
+            meter.sample()
+        self.assertEqual(meter.data['memory_events'], self.record())
+
+    def test_failure_diagnostics_keep_observations_without_declaring_capacity_safe(self):
+        row = FailureMeasurementTests().observation()
+        row['resources']['memory_events'] = self.record()
+        result = host.diagnostics(row)['partial_measurements']
+        self.assertEqual(result['resources']['memory_events'], self.record())
+        self.assertIs(result['complete'], False)
+        row['resources']['memory_events'] = None
+        self.assertIsNone(host.diagnostics(row)['partial_measurements']['resources']['memory_events'])
+
+    def test_host_rejects_invalid_events_and_filters_them_in_failure_output(self):
+        invalid = [dict(self.record(), source='/private/SECRET'), dict(self.record(), secret='SECRET'),
+                   dict(self.record(), counters={'oom': 0}), [], 'SECRET']
+        for value in (True, -1, '1', 1.25, 2 ** 63):
+            row = self.record();row['counters']['oom'] = value;invalid.append(row)
+        for events in invalid:
+            row = HostTests().success_fixture();row['resources']['memory_events'] = events
+            with self.subTest(events=events), self.assertRaisesRegex(host.Stop, 'BUILD_MEMORY_EVENTS_SCHEMA'):
+                host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
+            self.assertNotIn('memory_events', host.partial_measurements(row)['resources'])
+
+    def test_host_preserves_null_or_measured_events_but_requires_the_field(self):
+        for events in (None, self.record()):
+            row = HostTests().success_fixture();row['resources']['memory_events'] = events
+            host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
+        del row['resources']['memory_events']
+        with self.assertRaisesRegex(host.Stop, 'BUILD_MEMORY_EVENTS_SCHEMA'):
+            host.validate(row, PLAN, worker, installer, install_host, dependency_host, dependency)
 
 
 class FailureMeasurementTests(unittest.TestCase):
@@ -527,7 +611,7 @@ class FailureMeasurementTests(unittest.TestCase):
                     patch.object(host.subprocess, 'run', return_value=SimpleNamespace(
                         stdout=json.dumps(value), stderr='', returncode=3)) as docker, patch('builtins.print'):
                 result = host.main(['--output', str(target), '--allow-pull', '--allow-install',
-                    '--allow-rust-install', '--allow-ci430-replacements', '--allow-ruby-3412-rust-build', '--ephemeral-ci'])
+                    '--allow-rust-install', '--allow-ci430-replacements', '--allow-ruby-409-rust-build', '--ephemeral-ci'])
             saved = json.loads(target.read_text())
         self.assertEqual(result, 3)
         self.assertEqual(saved['status'], 'INCOMPLETE')
@@ -543,7 +627,7 @@ class HostTests(unittest.TestCase):
         names = ['configure-negative', 'configure', 'make', 'install', 'runtime']
         names += ['command-' + n for n in worker.COMMANDS] + ['ri-String']
         return {'schema': worker.SCHEMA, 'status': worker.SUCCESS, 'stage': 'finished',
-            'condition': {'ruby': '3.4.12', 'prefix': '/opt/ruby', 'documentation': True,
+            'condition': {'ruby': '4.0.9', 'prefix': '/opt/ruby', 'documentation': True,
                           'rust': True, 'make_jobs': 1}, 'configure_argv': list(worker.CONFIGURE),
             'p1_04_complete': False, 'phase1_complete': False, 'role_verified': False,
             'idempotence_verified': False, 'full_workspace_retained': False,
@@ -551,22 +635,23 @@ class HostTests(unittest.TestCase):
             'rust_present_after_dependencies': True, 'public_commands_unchanged': True,
             'rpm_and_repo_state_unchanged_by_build': True, 'ci_container_cleanup_required': True,
             'elapsed_seconds': 600, 'dependencies': dependency_fixture(), 'runtime': runtime_fixture(),
-            'source': {'version': '3.4.12', 'sha256': worker.SOURCE_SHA,
+            'source': {'version': '4.0.9', 'sha256': worker.SOURCE_SHA,
                 'sha256_expected': worker.SOURCE_SHA, 'checksum_match': True, 'http_status': 200,
                 'extraction_verified': True, 'archive': {'status': 'PASSED', 'gzip_eof_verified': True},
                 'redirect_policy': 'no_redirect_followed', 'bytes': 23000000},
             'public_before': dict.fromkeys(range(18), 'absent'),
             'public_after': dict.fromkeys(range(18), 'absent'),
             'commands': [{'name': n, 'path': '/opt/ruby/bin/' + n, 'returncode': 0} for n in worker.COMMANDS],
-            'build_settings': {'USE_YJIT': 0, 'USE_RJIT': 0, 'configure_summary_jit_disabled': True,
+            'build_settings': {'USE_YJIT': 0, 'USE_ZJIT': 0, 'configure_summary_jit_disabled': True,
                 'makefile_values': {'prefix': '/opt/ruby', 'ENABLE_SHARED': 'yes', 'YJIT_SUPPORT': 'no',
-                                   'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
+                                   'ZJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
                                    'INSTALLDOC': 'all', 'EXTOUT': '.ext'}},
-            'documentation': {'enabled': True, 'system_dir': '/opt/ruby/share/ri/3.4.0/system',
+            'documentation': {'enabled': True, 'system_dir': '/opt/ruby/share/ri/4.0.0/system',
                               'standard_String_verified': True, 'other_stores_disabled': True},
             'runs': [{'name': n, 'returncode': 1 if n == 'configure-negative' else 0,
                       'elapsed_seconds': 1, 'bytes': 10, 'sha256': 'a' * 64, 'tail': 'diagnostic'} for n in names],
-            'resources': {'sample_count': 10}, 'prefix_size': {'allocated_bytes': 1000000}}
+            'resources': {'sample_count': 10, 'memory_events': None},
+            'prefix_size': {'allocated_bytes': 1000000}}
 
     def test_complete_result_passes_and_changed_contract_stops(self):
         fixture = self.success_fixture()
@@ -627,7 +712,7 @@ class HostTests(unittest.TestCase):
             self.assertNotIn(option, argv)
         self.assertEqual(argv[argv.index('--memory') + 1], '2g')
         self.assertEqual(argv[argv.index('--memory-swap') + 1], '2g')
-        self.assertIn('RUBY_P1_BUILD_PROBE=r35', argv)
+        self.assertIn('RUBY_P1_BUILD_PROBE=r36', argv)
 
     def test_hash_checked_helpers_and_bundle_compile(self):
         for filename in host.HELPERS:

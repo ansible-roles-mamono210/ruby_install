@@ -1,4 +1,4 @@
-"""One fixed Ruby 3.4.12 evaluation build, only inside a disposable CI container."""
+"""One fixed Ruby 4.0.9 evaluation build, only inside a disposable CI container."""
 import hashlib
 import http.client
 import json
@@ -16,17 +16,17 @@ import tarfile
 import tempfile
 import time
 
-SCHEMA = 'ruby-p1-build-container-r35'
-SUCCESS = 'RUBY_3412_DOCS_ON_RUST_PRESENT_BUILD_VERIFIED'
-VERSION = '3.4.12'
+SCHEMA = 'ruby-p1-build-container-r36'
+SUCCESS = 'RUBY_409_DOCS_ON_RUST_PRESENT_BUILD_VERIFIED'
+VERSION = '4.0.9'
 PREFIX = '/opt/ruby'
-SOURCE_SHA = '5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479'
-SOURCE_PATH = '/pub/ruby/3.4/ruby-3.4.12.tar.gz'
+SOURCE_SHA = 'c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511'
+SOURCE_PATH = '/pub/ruby/4.0/ruby-4.0.9.tar.gz'
 COMMANDS = ('ruby', 'gem', 'bundle', 'bundler', 'irb', 'erb', 'rdoc', 'ri', 'rake')
 CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby',
-             '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-rjit',
+             '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-zjit',
              '--enable-install-doc', '--enable-install-rdoc', '--disable-install-capi')
-UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r35'
+UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r36'
 MIN_FREE = 8 * 1024 ** 3
 MAX_LOG = 64 * 1024 ** 2
 TAIL_BYTES = 16384
@@ -60,7 +60,7 @@ def mount_for(path, text):
 
 
 def preflight():
-    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r35' and os.getuid() == 0
+    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r36' and os.getuid() == 0
          and platform.system() == 'Linux' and platform.machine() == 'x86_64'
          and platform.python_version() == '3.9.19' and Path('/.dockerenv').is_file(), 'IDENTITY')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
@@ -115,7 +115,7 @@ def download(source, directory, row):
     path = Path(directory) / 'source.tar.gz'
     try:
         connection.request('GET', fixed[1], headers={'Accept-Encoding': 'identity',
-                           'User-Agent': 'ruby-p1-build-measurement-r35'})
+                           'User-Agent': 'ruby-p1-build-measurement-r36'})
         response = connection.getresponse()
         row['http_status'] = response.status
         need(response.status == 200, 'SOURCE_HTTP_STATUS_OR_REDIRECT')
@@ -200,6 +200,36 @@ def size_tree(path):
     return {'apparent_bytes': apparent, 'allocated_bytes': allocated}
 
 
+def memory_events_snapshot():
+    """Read cgroup-lifetime counters, not a build-only delta or a capacity verdict."""
+    required = {'low', 'high', 'max', 'oom', 'oom_kill'}
+    allowed = required | {'oom_group_kill'}
+    for name in ('/sys/fs/cgroup/memory.events.local', '/sys/fs/cgroup/memory.events'):
+        try:
+            with Path(name).open('r', encoding='ascii') as handle:
+                text = handle.read(8193)
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError):
+            return None
+        if len(text) > 8192:
+            return None
+        counters = {}
+        for line in text.splitlines():
+            fields = line.split()
+            if not fields or fields[0] not in allowed:
+                continue  # Do not persist unrelated or future kernel fields.
+            if (len(fields) != 2 or fields[0] in counters or
+                    re.fullmatch(r'[0-9]{1,19}', fields[1]) is None or
+                    int(fields[1]) > 2 ** 63 - 1):
+                return None
+            counters[fields[0]] = int(fields[1])
+        if not required <= set(counters):
+            return None
+        return {'source': name, 'counters': counters}
+    return None  # Missing/invalid evidence must never become zero events.
+
+
 class Meter:
     def __init__(self, workspace):
         self.workspace = workspace
@@ -208,9 +238,11 @@ class Meter:
                      'prefix_peak_allocated_bytes_sampled': 0,
                      'combined_peak_allocated_bytes_sampled': 0,
                      'minimum_free_bytes_sampled': shutil.disk_usage('/tmp').free,
-                     'memory_peak_bytes': None, 'memory_peak_source': 'unavailable'}
+                     'memory_peak_bytes': None, 'memory_peak_source': 'unavailable',
+                     'memory_events': None}
 
     def sample(self):
+        self.data['memory_events'] = memory_events_snapshot()
         workspace, prefix = size_tree(self.workspace), size_tree(PREFIX)
         self.data['sample_count'] += 1
         for key, value in (('workspace', workspace['allocated_bytes']),
@@ -280,26 +312,26 @@ def run(name, argv, cwd, directory, report, meter, timeout, end, require_success
 def build_settings(directory, configure_log):
     text = (directory / 'Makefile').read_text()
     values = {}
-    for key in ('prefix', 'ENABLE_SHARED', 'YJIT_SUPPORT', 'RJIT_SUPPORT', 'DOCTARGETS',
+    for key in ('prefix', 'ENABLE_SHARED', 'YJIT_SUPPORT', 'ZJIT_SUPPORT', 'DOCTARGETS',
                 'INSTALLDOC', 'EXTOUT'):
         match = re.search(r'^' + key + r'\s*=\s*([^\n]*)$', text, re.M)
         need(match is not None, 'BUILD_SETTING_MISSING')
         values[key] = match[1].strip()
     need(values == {'prefix': PREFIX, 'ENABLE_SHARED': 'yes', 'YJIT_SUPPORT': 'no',
-                    'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
+                    'ZJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
                     'INSTALLDOC': 'all', 'EXTOUT': '.ext'}, 'BUILD_SETTING_MISMATCH')
     headers = list(directory.glob('.ext/include/*/ruby/config.h'))
     need(len(headers) == 1, 'BUILD_CONFIG_HEADER')
     header = headers[0].read_text()
-    for name in ('USE_YJIT', 'USE_RJIT'):
+    for name in ('USE_YJIT', 'USE_ZJIT'):
         need(re.search(r'^#define ' + name + r'\s+0\s*$', header, re.M) is not None, 'JIT_BUILD_ENABLED')
     summary = configure_log.read_text(errors='replace')
     need(re.search(r'\* install doc:\s+rdoc\s*$', summary, re.M) is not None,
          'DOCUMENTATION_SUMMARY_MISMATCH')
-    for name in ('YJIT', 'RJIT'):
+    for name in ('YJIT', 'ZJIT'):
         need(re.search(r'\* ' + name + r' support:\s+no\s*$', summary, re.M) is not None,
              'JIT_SUMMARY_MISSING')
-    return {'makefile_values': values, 'USE_YJIT': 0, 'USE_RJIT': 0,
+    return {'makefile_values': values, 'USE_YJIT': 0, 'USE_ZJIT': 0,
             'config_header_sha256': hashlib.sha256(headers[0].read_bytes()).hexdigest(),
             'configure_summary_jit_disabled': True}
 
@@ -307,7 +339,7 @@ def build_settings(directory, configure_log):
 RUNTIME_RUBY = r'''require 'json'; require 'rbconfig'
 require 'openssl'; require 'psych'; require 'zlib'; require 'fiddle'
 require 'rdoc/ri/paths'
-jit = %w[YJIT RJIT].to_h do |name|
+jit = %w[YJIT ZJIT].to_h do |name|
   state = RubyVM.const_defined?(name) ? RubyVM.const_get(name).enabled? : 'absent'
   [name, state]
 end
@@ -317,7 +349,7 @@ libraries = File.readlines('/proc/self/maps').filter_map do |line|
 end.uniq
 puts JSON.generate(version: RUBY_VERSION, ruby: File.realpath(RbConfig.ruby),
   prefix: RbConfig::CONFIG['prefix'], shared: RbConfig::CONFIG['ENABLE_SHARED'],
-  yjit_build: RbConfig::CONFIG['YJIT_SUPPORT'], rjit_build: RbConfig::CONFIG['RJIT_SUPPORT'],
+  yjit_build: RbConfig::CONFIG['YJIT_SUPPORT'], zjit_build: RbConfig::CONFIG['ZJIT_SUPPORT'],
   jit: jit, shared_libraries: libraries, ri_system: RDoc::RI::Paths.system_dir,
   extensions: {openssl: OpenSSL::OPENSSL_VERSION, psych: Psych::VERSION,
     zlib: Zlib::ZLIB_VERSION, fiddle: Fiddle::VERSION})
@@ -326,11 +358,11 @@ puts JSON.generate(version: RUBY_VERSION, ruby: File.realpath(RbConfig.ruby),
 
 def validate_runtime(value):
     need(type(value) is dict and set(value) == {'version', 'ruby', 'prefix', 'shared',
-         'yjit_build', 'rjit_build', 'jit', 'shared_libraries', 'ri_system', 'extensions'}, 'RUNTIME_SCHEMA')
+         'yjit_build', 'zjit_build', 'jit', 'shared_libraries', 'ri_system', 'extensions'}, 'RUNTIME_SCHEMA')
     need(value['version'] == VERSION and value['ruby'] == PREFIX + '/bin/ruby'
          and value['prefix'] == PREFIX and value['shared'] == 'yes'
-         and value['yjit_build'] == 'no' and value['rjit_build'] == 'no', 'RUNTIME_IDENTITY')
-    need(type(value['jit']) is dict and set(value['jit']) == {'YJIT', 'RJIT'} and
+         and value['yjit_build'] == 'no' and value['zjit_build'] == 'no', 'RUNTIME_IDENTITY')
+    need(type(value['jit']) is dict and set(value['jit']) == {'YJIT', 'ZJIT'} and
          all(v is False or v == 'absent' for v in value['jit'].values()), 'RUNTIME_JIT')
     need(type(value['shared_libraries']) is list and len(value['shared_libraries']) >= 1 and
          all(type(p) is str and p.startswith(PREFIX + '/lib/') and '..' not in p.split('/')
@@ -349,7 +381,7 @@ def documentation_arguments(docs):
 
 def documentation_on(runtime, directory, report, meter, end):
     docs = Path(runtime['ri_system'])
-    need(str(docs) == PREFIX + '/share/ri/3.4.0/system' and
+    need(str(docs) == PREFIX + '/share/ri/4.0.0/system' and
          docs.is_dir() and Path(PREFIX) in docs.resolve().parents and
          (docs / 'String' / 'cdesc-String.ri').is_file(), 'STANDARD_DOCUMENTATION_MISSING')
     log = run('ri-String', documentation_arguments(docs), '/tmp',
@@ -469,7 +501,7 @@ def main(source, installer, dependency, expected, rust_worker):
     try:
         report['preflight'] = preflight()
         os.umask(0o077)
-        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r35-', dir='/tmp')
+        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r36-', dir='/tmp')
         meter = Meter(directory)
         evaluate(source, installer, dependency, expected, report, directory, meter, start + 2250, rust_worker)
     except Exception as error:
