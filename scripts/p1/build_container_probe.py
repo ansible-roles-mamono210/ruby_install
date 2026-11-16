@@ -1,4 +1,4 @@
-"""One fixed Ruby 4.0.9 evaluation build, only inside a disposable CI container."""
+"""One fixed Ruby 3.4.12 evaluation build, only inside a disposable CI container."""
 import hashlib
 import http.client
 import json
@@ -16,17 +16,17 @@ import tarfile
 import tempfile
 import time
 
-SCHEMA = 'ruby-p1-build-container-r32'
-SUCCESS = 'RUBY_409_DOCS_OFF_CUSTOM_PREFIX_BUILD_VERIFIED'
-VERSION = '4.0.9'
-PREFIX = '/opt/ruby-4.0.9-docs-off'
-SOURCE_SHA = 'c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511'
-SOURCE_PATH = '/pub/ruby/4.0/ruby-4.0.9.tar.gz'
+SCHEMA = 'ruby-p1-build-container-r35'
+SUCCESS = 'RUBY_3412_DOCS_ON_RUST_PRESENT_BUILD_VERIFIED'
+VERSION = '3.4.12'
+PREFIX = '/opt/ruby'
+SOURCE_SHA = '5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479'
+SOURCE_PATH = '/pub/ruby/3.4/ruby-3.4.12.tar.gz'
 COMMANDS = ('ruby', 'gem', 'bundle', 'bundler', 'irb', 'erb', 'rdoc', 'ri', 'rake')
-CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby-4.0.9-docs-off',
-             '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-zjit',
-             '--disable-install-doc', '--disable-install-capi')
-UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r32'
+CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby',
+             '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-rjit',
+             '--enable-install-doc', '--enable-install-rdoc', '--disable-install-capi')
+UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r35'
 MIN_FREE = 8 * 1024 ** 3
 MAX_LOG = 64 * 1024 ** 2
 TAIL_BYTES = 16384
@@ -60,7 +60,7 @@ def mount_for(path, text):
 
 
 def preflight():
-    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r32' and os.getuid() == 0
+    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r35' and os.getuid() == 0
          and platform.system() == 'Linux' and platform.machine() == 'x86_64'
          and platform.python_version() == '3.9.19' and Path('/.dockerenv').is_file(), 'IDENTITY')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
@@ -73,7 +73,6 @@ def preflight():
     need(not any(v and (k in forbidden or k.lower().endswith('_proxy'))
                  for k, v in os.environ.items()), 'ENVIRONMENT_OVERRIDE')
     need(not os.path.lexists(PREFIX), 'PREFIX_EXISTS')
-    need(not os.path.lexists('/opt/ruby'), 'DEFAULT_PREFIX_EXISTS')
     parent = Path('/tmp')
     need(parent.is_dir() and not parent.is_symlink() and os.access(parent, os.W_OK | os.X_OK),
          'WORKSPACE_PARENT')
@@ -116,7 +115,7 @@ def download(source, directory, row):
     path = Path(directory) / 'source.tar.gz'
     try:
         connection.request('GET', fixed[1], headers={'Accept-Encoding': 'identity',
-                           'User-Agent': 'ruby-p1-build-measurement-r32'})
+                           'User-Agent': 'ruby-p1-build-measurement-r35'})
         response = connection.getresponse()
         row['http_status'] = response.status
         need(response.status == 200, 'SOURCE_HTTP_STATUS_OR_REDIRECT')
@@ -281,26 +280,26 @@ def run(name, argv, cwd, directory, report, meter, timeout, end, require_success
 def build_settings(directory, configure_log):
     text = (directory / 'Makefile').read_text()
     values = {}
-    for key in ('prefix', 'ENABLE_SHARED', 'YJIT_SUPPORT', 'ZJIT_SUPPORT', 'DOCTARGETS',
+    for key in ('prefix', 'ENABLE_SHARED', 'YJIT_SUPPORT', 'RJIT_SUPPORT', 'DOCTARGETS',
                 'INSTALLDOC', 'EXTOUT'):
         match = re.search(r'^' + key + r'\s*=\s*([^\n]*)$', text, re.M)
         need(match is not None, 'BUILD_SETTING_MISSING')
         values[key] = match[1].strip()
     need(values == {'prefix': PREFIX, 'ENABLE_SHARED': 'yes', 'YJIT_SUPPORT': 'no',
-                    'ZJIT_SUPPORT': 'no', 'DOCTARGETS': 'nodoc nodoc',
-                    'INSTALLDOC': 'nodoc', 'EXTOUT': '.ext'}, 'BUILD_SETTING_MISMATCH')
+                    'RJIT_SUPPORT': 'no', 'DOCTARGETS': 'rdoc nodoc',
+                    'INSTALLDOC': 'all', 'EXTOUT': '.ext'}, 'BUILD_SETTING_MISMATCH')
     headers = list(directory.glob('.ext/include/*/ruby/config.h'))
     need(len(headers) == 1, 'BUILD_CONFIG_HEADER')
     header = headers[0].read_text()
-    for name in ('USE_YJIT', 'USE_ZJIT'):
+    for name in ('USE_YJIT', 'USE_RJIT'):
         need(re.search(r'^#define ' + name + r'\s+0\s*$', header, re.M) is not None, 'JIT_BUILD_ENABLED')
     summary = configure_log.read_text(errors='replace')
-    need(re.search(r'\* install doc:\s+no\s*$', summary, re.M) is not None,
+    need(re.search(r'\* install doc:\s+rdoc\s*$', summary, re.M) is not None,
          'DOCUMENTATION_SUMMARY_MISMATCH')
-    for name in ('YJIT', 'ZJIT'):
+    for name in ('YJIT', 'RJIT'):
         need(re.search(r'\* ' + name + r' support:\s+no\s*$', summary, re.M) is not None,
              'JIT_SUMMARY_MISSING')
-    return {'makefile_values': values, 'USE_YJIT': 0, 'USE_ZJIT': 0,
+    return {'makefile_values': values, 'USE_YJIT': 0, 'USE_RJIT': 0,
             'config_header_sha256': hashlib.sha256(headers[0].read_bytes()).hexdigest(),
             'configure_summary_jit_disabled': True}
 
@@ -308,7 +307,7 @@ def build_settings(directory, configure_log):
 RUNTIME_RUBY = r'''require 'json'; require 'rbconfig'
 require 'openssl'; require 'psych'; require 'zlib'; require 'fiddle'
 require 'rdoc/ri/paths'
-jit = %w[YJIT ZJIT].to_h do |name|
+jit = %w[YJIT RJIT].to_h do |name|
   state = RubyVM.const_defined?(name) ? RubyVM.const_get(name).enabled? : 'absent'
   [name, state]
 end
@@ -318,7 +317,7 @@ libraries = File.readlines('/proc/self/maps').filter_map do |line|
 end.uniq
 puts JSON.generate(version: RUBY_VERSION, ruby: File.realpath(RbConfig.ruby),
   prefix: RbConfig::CONFIG['prefix'], shared: RbConfig::CONFIG['ENABLE_SHARED'],
-  yjit_build: RbConfig::CONFIG['YJIT_SUPPORT'], zjit_build: RbConfig::CONFIG['ZJIT_SUPPORT'],
+  yjit_build: RbConfig::CONFIG['YJIT_SUPPORT'], rjit_build: RbConfig::CONFIG['RJIT_SUPPORT'],
   jit: jit, shared_libraries: libraries, ri_system: RDoc::RI::Paths.system_dir,
   extensions: {openssl: OpenSSL::OPENSSL_VERSION, psych: Psych::VERSION,
     zlib: Zlib::ZLIB_VERSION, fiddle: Fiddle::VERSION})
@@ -327,11 +326,11 @@ puts JSON.generate(version: RUBY_VERSION, ruby: File.realpath(RbConfig.ruby),
 
 def validate_runtime(value):
     need(type(value) is dict and set(value) == {'version', 'ruby', 'prefix', 'shared',
-         'yjit_build', 'zjit_build', 'jit', 'shared_libraries', 'ri_system', 'extensions'}, 'RUNTIME_SCHEMA')
+         'yjit_build', 'rjit_build', 'jit', 'shared_libraries', 'ri_system', 'extensions'}, 'RUNTIME_SCHEMA')
     need(value['version'] == VERSION and value['ruby'] == PREFIX + '/bin/ruby'
          and value['prefix'] == PREFIX and value['shared'] == 'yes'
-         and value['yjit_build'] == 'no' and value['zjit_build'] == 'no', 'RUNTIME_IDENTITY')
-    need(type(value['jit']) is dict and set(value['jit']) == {'YJIT', 'ZJIT'} and
+         and value['yjit_build'] == 'no' and value['rjit_build'] == 'no', 'RUNTIME_IDENTITY')
+    need(type(value['jit']) is dict and set(value['jit']) == {'YJIT', 'RJIT'} and
          all(v is False or v == 'absent' for v in value['jit'].values()), 'RUNTIME_JIT')
     need(type(value['shared_libraries']) is list and len(value['shared_libraries']) >= 1 and
          all(type(p) is str and p.startswith(PREFIX + '/lib/') and '..' not in p.split('/')
@@ -343,22 +342,22 @@ def validate_runtime(value):
 
 
 def documentation_arguments(docs):
-    # Kept for the prior formatter regression; the docs-OFF condition performs no lookup.
+    # CI420 established rdoc as a supported formatter; isolate the installed system store.
     return [PREFIX + '/bin/ri', '--no-pager', '--format=rdoc',
             '--no-standard-docs', '--doc-dir=' + str(docs), 'String']
 
 
-def documentation_off(build, runtime):
-    # Fixed Ruby 4.0.9 common.mk outputs; EXTOUT is checked before make.
-    relative_outputs = ('.ext/rdoc', '.ext/html', 'doc/capi')
-    for relative in relative_outputs:
-        need(not os.path.lexists(build / relative), 'DOCUMENTATION_GENERATED')
+def documentation_on(runtime, directory, report, meter, end):
     docs = Path(runtime['ri_system'])
-    need(str(docs) == PREFIX + '/share/ri/4.0.0/system', 'DOCUMENTATION_PATH')
-    need(not os.path.lexists(docs), 'DOCUMENTATION_INSTALLED')
-    return {'enabled': False, 'system_dir': str(docs), 'system_store_absent': True,
-            'generated_outputs_absent': list(relative_outputs),
-            'standard_lookup_performed': False}
+    need(str(docs) == PREFIX + '/share/ri/3.4.0/system' and
+         docs.is_dir() and Path(PREFIX) in docs.resolve().parents and
+         (docs / 'String' / 'cdesc-String.ri').is_file(), 'STANDARD_DOCUMENTATION_MISSING')
+    log = run('ri-String', documentation_arguments(docs), '/tmp',
+              directory, report, meter, 30, end)
+    need(log.stat().st_size > 100 and 'String' in log.read_text(errors='replace'),
+         'STANDARD_DOCUMENTATION_FAILED')
+    return {'enabled': True, 'system_dir': str(docs),
+            'standard_String_verified': True, 'other_stores_disabled': True}
 
 
 def validate_shebang(shebang):
@@ -366,10 +365,12 @@ def validate_shebang(shebang):
                   shebang) is not None, 'COMMAND_EXTERNAL_RUBY')
 
 
-def evaluate(source, installer, dependency, expected, report, directory, meter, end):
+def evaluate(source, installer, dependency, expected, report, directory, meter, end, rust_worker):
     report['public_before'] = public_state()
     report['stage'] = 'dependencies'
-    dep = {'schema': installer.SCHEMA, 'status': 'INCOMPLETE', 'stage': 'identity',
+    dep = {'schema': rust_worker.SCHEMA, 'status': 'INCOMPLETE', 'stage': 'identity',
+           'plan_reference': 'CI430', 'rust_installed': False, 'rust_compiler_checked': False,
+           'p1_04_complete': False,
            'rpm_downloaded': False, 'all_signatures_verified': False,
            'transaction_started': False, 'transaction_returned': False,
            'ruby_build_verified': False, 'p1_03_complete': False, 'phase1_complete': False,
@@ -384,13 +385,15 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
             import dnf.callback
             import rpm
             need(str(dnf.__version__) == '4.14.0' and str(rpm.__version__) == '4.16.1.3', 'DEPENDENCY_IDENTITY')
-            installer.execute(dependency, dnf, rpm, expected, directory, dep)
+            rust_worker.execute(installer, dependency, dnf, rpm, expected, directory, dep)
     finally:
         signal.alarm(max(1, int(end - time.monotonic())))
     dep['elapsed_seconds'] = round(time.monotonic() - begin, 3)
-    need(shutil.which('rustc', path='/usr/local/bin:/usr/bin:/bin') is None and
-         not any(row['name'].startswith(('rust', 'cargo')) for row in installer.inventory(rpm)), 'RUST_PRESENT')
-    report['rust_absent_after_dependencies'] = True
+    need(dep.get('status') == rust_worker.SUCCESS and dep.get('rust_installed') is True
+         and dep.get('rust_compiler_checked') is True
+         and shutil.which('rustc', path=clean_env(directory)['PATH']) == '/usr/bin/rustc',
+         'RUST_COMPILER_UNCONFIRMED')
+    report['rust_present_after_dependencies'] = True
     report['stage'] = 'download'
     report['source'] = {'version': VERSION, 'sha256_expected': SOURCE_SHA}
     archive = download(source, directory, report['source'])
@@ -440,9 +443,7 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
         need(0 < log.stat().st_size < 16384, 'COMMAND_OUTPUT')
         report['commands'].append({'name': command, 'path': str(path), 'returncode': 0})
     report['stage'] = 'documentation'
-    report['documentation'] = documentation_off(build, value)
-    need(not os.path.lexists('/opt/ruby'), 'DEFAULT_PREFIX_CREATED')
-    report['default_prefix_absent'] = True
+    report['documentation'] = documentation_on(value, directory, report, meter, end)
     report['stage'] = 'final_state'
     report['public_after'] = public_state()
     need(report['public_before'] == report['public_after'], 'PUBLIC_COMMANDS_CHANGED')
@@ -454,11 +455,11 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
                   public_commands_unchanged=True, rpm_and_repo_state_unchanged_by_build=True)
 
 
-def main(source, installer, dependency, expected):
+def main(source, installer, dependency, expected, rust_worker):
     report = {'schema': SCHEMA, 'status': 'INCOMPLETE', 'stage': 'identity', 'runs': [],
               'ruby_build_verified': False, 'p1_04_complete': False, 'phase1_complete': False,
               'role_verified': False, 'idempotence_verified': False,
-              'condition': {'ruby': VERSION, 'prefix': PREFIX, 'documentation': False, 'rust': False,
+              'condition': {'ruby': VERSION, 'prefix': PREFIX, 'documentation': True, 'rust': True,
                             'make_jobs': 1}, 'configure_argv': list(CONFIGURE)}
     start, directory, meter = time.monotonic(), None, None
     def expired(_sig, _frame):
@@ -468,11 +469,11 @@ def main(source, installer, dependency, expected):
     try:
         report['preflight'] = preflight()
         os.umask(0o077)
-        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r32-', dir='/tmp')
+        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r35-', dir='/tmp')
         meter = Meter(directory)
-        evaluate(source, installer, dependency, expected, report, directory, meter, start + 2250)
+        evaluate(source, installer, dependency, expected, report, directory, meter, start + 2250, rust_worker)
     except Exception as error:
-        report['reason'] = str(error) if type(error) in (Stop, installer.Stop, source.Stop) else 'API_OR_RUNTIME_ERROR'
+        report['reason'] = str(error) if type(error) in (Stop, installer.Stop, source.Stop, rust_worker.Stop) else 'API_OR_RUNTIME_ERROR'
         report['error_type'] = type(error).__name__
     finally:
         signal.alarm(0)
@@ -496,4 +497,4 @@ def main(source, installer, dependency, expected):
 
 
 if __name__ == '__main__':
-    raise SystemExit(main(_source, _installer, _dependency, _expected))
+    raise SystemExit(main(_source, _installer, _dependency, _expected, _rust_worker))
