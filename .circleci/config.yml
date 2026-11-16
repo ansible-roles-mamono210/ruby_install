@@ -81,16 +81,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Measure Ruby dependencies plus Rust without installing RPMs
-          no_output_timeout: 16m
+          name: Install the CI430 Rust dependency plan and check the compiler
+          no_output_timeout: 22m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
-            timeout --signal=TERM --kill-after=30s 15m \
-              python3 scripts/p1/rust_dependency_probe.py \
-              --allow-pull --ephemeral-ci --allow-repo-metadata --allow-rust-solver \
+            timeout --signal=TERM --kill-after=30s 21m \
+              python3 scripts/p1/rust_install_probe.py \
+              --allow-pull --ephemeral-ci --allow-rust-install --allow-ci430-replacements \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
