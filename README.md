@@ -11,13 +11,19 @@ An Ansible role for installing Ruby from source on CentOS Stream 9.
 > establish Role installation, idempotence, or release readiness. The badge above
 > reports the `main` branch, not completion of the v1.0.0 contract.
 
+The planned v0.1.0 is a development snapshot of Phase 1 specifications,
+evaluation tooling and evidence. It does not deliver an implementation of the
+new Role contract. The release boundaries below distinguish this snapshot from
+the installation and publication features planned for later versions.
+
 ## v1.0.0 contract
 
 This section consolidates the adopted technical requirements for v1.0.0. Its
 source is Redmine project 419, `20261108_ruby_100_roadmap_chatgpt_002_contract`
-version 9, with the explicit updates in section 14 taking precedence over earlier
-candidate values. The Roadmap, `20261108_ruby_100_roadmap_chatgpt_001_draft`
-version 10, owns phase order and release scope. This README is the repository
+version 11, sections 14–16. Later explicit decisions take precedence over
+earlier candidate values and historical status descriptions. The Roadmap,
+`20261108_ruby_100_roadmap_chatgpt_001_draft` version 12, owns phase order and
+the staged release scope. This README is the repository
 destination for the technical contract; source code and test evidence determine
 what has actually been implemented and verified.
 
@@ -71,9 +77,14 @@ and `-e ruby_install_documentation=false` pass strings and must be rejected.
 
 ### Migration from earlier names
 
-Every old name below must cause a pre-change error with its replacement or
-removal reason, including an empty value or simultaneous old and new names.
-There are no compatibility aliases, automatic value selection or conversion.
+Each of the following five old names, if visible when this Role executes, must
+cause a pre-change error with its replacement or removal reason, including an
+empty/null value or simultaneous old and new names. This applies regardless of
+whether the visible variable came from inventory, another Role, a registered
+result or an explicit Role argument. The Role does not infer the caller's intent
+from the variable's origin. There are no compatibility aliases, automatic value
+selection or conversion. Actual visibility depends on Ansible scoping; this is
+not a claim that every other Role's variables are always exposed.
 
 | Old name | Origin | Replacement or disposition |
 | --- | --- | --- |
@@ -82,11 +93,12 @@ There are no compatibility aliases, automatic value selection or conversion.
 | `ruby_download_url` | Earlier implementation | `ruby_install_download_url`; automatic derivation replaces an independent fixed default URL |
 | `ruby_make_prefix` | Earlier implementation | Removed; use `ruby_install_prefix`. Do not convert `/usr/local/bin/ruby` into a directory prefix automatically |
 | `ruby_source_configure_command` | Earlier README only | Removed; arbitrary shell/configure commands are not a public API |
-| `ruby_download_checksum` | Earlier contract proposal | `ruby_install_download_checksum` |
-| `ruby_create_symlinks` | Earlier contract proposal | `ruby_install_create_symlinks` |
-| `ruby_symlink_commands` | Earlier contract proposal | `ruby_install_symlink_commands` |
-| `ruby_build_jobs` | Earlier contract proposal | `ruby_install_build_jobs` |
-| `ruby_keep_build_workspace` | Earlier contract proposal | `ruby_install_keep_build_workspace` |
+
+Five names appeared only in an earlier contract proposal:
+`ruby_download_checksum`, `ruby_create_symlinks`, `ruby_symlink_commands`,
+`ruby_build_jobs` and `ruby_keep_build_workspace`. Their presence alone is no
+longer rejected. They are neither public inputs nor aliases and do not configure
+this Role. Use the corresponding `ruby_install_` names.
 
 `ruby_install_prefix` and `ruby_install_documentation` retain their adopted
 names. When the Role implementation changes, migration notes, CHANGELOG, examples
@@ -116,12 +128,15 @@ All redirects, including HTTPS-to-HTTPS redirects, must fail without contacting
 the redirect destination. A URL must serve the archive directly. An earlier
 observation of an official URL does not guarantee its future behavior.
 
-The evaluated Ansible route proposed for Phase 3 is:
+Proxy use is explicitly unsupported through the first stable release.
+The Role must not inherit an environment proxy; a proxy-only network cannot use
+this acquisition path. Supporting proxies later requires a separate contract
+decision. The adopted Phase 3 acquisition route is:
 
 1. Download the actual file with `ansible.builtin.uri`, `follow_redirects: none`,
-   `validate_certs: true` and HTTP 200 as the accepted result. The evaluated route
-   disables implicit proxy/netrc use and HTTP Content-Encoding decompression; it does not
-   substitute a preliminary URL check for control of the actual download.
+   `validate_certs: true` and HTTP 200 as the accepted result. Set
+   `use_proxy: false`, `use_netrc: false` and `decompress: false` explicitly.
+   A preliminary URL check does not replace control of the actual download.
 2. Use `ansible.builtin.stat` with `checksum_algorithm: sha256` and `follow: false`
    to obtain file attributes and its digest. Use `ansible.builtin.assert` to
    require a regular, non-symlink file and the expected digest.
@@ -130,7 +145,8 @@ The evaluated Ansible route proposed for Phase 3 is:
 4. Only then extract, build and install into the managed prefix.
 
 The `uri` → `stat` → `assert` route passed the bounded evaluation described below;
-its selection for the Role is part of this README proposal. The evaluation's
+its selection was adopted in contract section 15 and supplemented in section 16.
+Production Role integration remains unimplemented. The evaluation's
 fixture gate marker is not an installation record and must not replace archive
 validation or production installation checks. Archive validation remains a
 Phase 3 implementation responsibility. No `follow_redirects` option is passed
@@ -143,19 +159,32 @@ user-selected source is trustworthy.
 
 ### Paths, workspace and capacity
 
-Normalize and validate absolute prefix/workspace paths and their resolved
-locations. The managed areas must not overlap or contain one another. Reject a
-prefix that is a regular file, a symlink, a shared base such as `/`, `/usr`,
-`/usr/local` or `/opt`, or whose ownership, permissions or resolved path cannot be
-established safely. An existing dedicated empty directory may be used only when
-its ownership, permissions and parent path are suitable.
+On every run, validate types, absolute paths, normalization and lexical
+prefix/workspace equality or containment. Reject a prefix that is a regular file,
+a final-component symlink or a shared base such as `/`, `/usr`, `/usr/local` or
+`/opt`. The prefix, its trusted existing parents, `bin/ruby`, the installation
+record and managed code/library paths loaded by health checks must be owned by
+root and not writable by group or others. Apply the same criteria to a dedicated
+empty prefix. Establish safety before executing existing Ruby as root.
 
-The workspace parent must already exist, be a directory and be writable by the
-execution identity. Do not create it automatically. `/tmp` remains a valid
-parent when these conditions are satisfied. Detect an applicable `noexec` mount
-before dependency installation, CRB changes or workspace creation, and stop
-with a reason. Do not change mount flags or work around this restriction.
-Absence of `noexec` alone does not prove that a build will succeed.
+Parent symlinks are allowed only after checking both the parent containing the
+link and the resolved path. Reject loops, unresolved paths, unsafe permissions
+or identity changes during observation. A safe parent symlink does not permit a
+symlink at the final prefix component.
+
+Only a new installation requires workspace environment checks: existing
+directory, write access, resolved-path non-overlap, noexec and usable capacity.
+Do not create the workspace parent automatically. A root-owned sticky shared
+parent such as `/tmp` is allowed; its private child must exclude other writers.
+Inspect `statvfs` flags at the actual workspace parent for `ST_NOEXEC` before
+dependencies, CRB changes or child creation. Stop on noexec or an inability to
+obtain the required observation, without changing mounts or bypassing noexec.
+A general mountinfo parser is not required. Absence of this flag does not prove
+that SELinux or every other execution constraint permits a build.
+
+A healthy identical rerun skips workspace existence, write access, noexec,
+capacity and resolved-path checks because it does not use a workspace. Static
+input checks and prefix, record, Ruby and link protection still apply.
 
 For a new installation, use a private child directory that other users cannot
 write. Do not trust or reuse shared tarballs, extracted trees or old build output.
@@ -177,8 +206,11 @@ The adopted free-space starting thresholds are:
 
 Check usable space with the actual execution identity at the workspace parent
 and the prefix's resolved filesystem; if the prefix is absent, use its existing
-parent. Do not infer filesystem identity from path strings or double-count bind
-mounts/overlay storage. Stop if the relevant storage cannot be identified.
+parent. Compare `st_dev`: equal values use the combined 2 GiB threshold once;
+different values use the two thresholds separately. Stop if required observations
+cannot be obtained. Different device IDs do not prove independent physical
+capacity. This preflight check does not attempt to predict every quota, overlay
+or tmpfs constraint.
 Check before starting a new installation and again after installing dependencies,
 before source acquisition. If the second check fails, do not claim dependencies
 were rolled back. Do not require the new-build allowance for a healthy no-op run.
@@ -206,9 +238,10 @@ installation must not install dependencies or change CRB.
 
 | Target | Configure/build contract |
 | --- | --- |
-| Both fixed Ruby versions | Explicit `--prefix`, `--enable-shared`, `--enable-rpath`, `--enable-option-checking=fatal` |
+| Both fixed Ruby versions | Explicit `--prefix`, `--enable-shared`, `--enable-rpath`, `--enable-option-checking=fatal`, `--disable-install-capi` |
 | Ruby 3.4.12 | Explicit `--disable-yjit` and `--disable-rjit` |
 | Ruby 4.0.9 | Explicit `--disable-yjit` and `--disable-zjit` |
+| Documentation true | Explicit `--enable-install-doc` and `--enable-install-rdoc` |
 | Documentation false | Add `--disable-install-doc`; omit standard document generation/installation |
 | Parallelism | Default build jobs 1; sequential installation |
 
@@ -237,7 +270,23 @@ the actual files, version, `RbConfig` paths and required functionality. The reco
 must identify the version, prefix, source SHA-256, shared-library/JIT policy and
 documentation setting. Its private filename and representation remain
 implementation choices. Finalize it only after installation and health checks
-succeed; a record alone never proves a healthy installation.
+succeed; a record alone never proves a healthy installation. Phase 2 defines
+the common record representation, validation and assembly logic; test fixtures
+use that same logic. Phase 3 writes the real prefix's completed record after
+successful installation and complete post-installation checks. Final identical
+rerun acceptance requires a record created by the Role, not only fixture records.
+
+| Check occasion | Required scope |
+| --- | --- |
+| Identical rerun | Requested version, RbConfig placement, shared library, openssl/psych/zlib, JIT and standard-documentation build settings |
+| Immediately after installation | Complete check including all nine commands, Fiddle, documentation on/off data and managed ri access when enabled; Phase 3 responsibility |
+| Before link publication | Selected command sources only, in addition to prefix/build-state checks |
+
+Do not pin every command version or inspect all ri data on each rerun. Ordinary
+`gem install` or `bundle install` changes alone do not invalidate an installation.
+Broken core functionality, a record/build mismatch or a missing selected link
+source still causes a stop. Runtime-disabled JIT alone does not prove that JIT
+was disabled at build time.
 
 | Observed state | Required behavior |
 | --- | --- |
@@ -246,13 +295,33 @@ succeed; a record alone never proves a healthy installation.
 | Same version/build contract, valid record and healthy files | No download, configure, make, dependency installation, CRB change or workspace creation; inspect links separately |
 | Same version but source digest, shared-library/JIT policy or documentation differs | Stop before host changes; do not rebuild or adjust documents |
 | Ruby exists but record is missing, unreadable, incomplete or inconsistent with placement | Stop; do not adopt unmanaged files |
-| Record exists but Ruby is missing or broken | Stop as incomplete installation and preserve files |
+| Valid record exists but Ruby is missing | Stop as incomplete installation and preserve files |
 | Different version in the same prefix | Stop; no upgrade, downgrade or overwrite |
 | Partial, corrupt, non-executable installation or missing required functionality | Stop; no automatic repair |
 | OS Ruby outside the managed prefix without path conflicts | Preserve it and allow coexistence |
 | Conflicting paths, unsupported environment or invalid inputs | Stop before dependencies, CRB or managed-path changes |
 | A different new prefix is requested while an old prefix remains | Assess the new prefix independently; preserve old prefix/links and stop on publication conflicts |
 | Build or installation fails partway | Report failure and possible partial prefix; do not finalize a successful record; a later run must reject incomplete state |
+
+When observations overlap, use the first applicable result in this order.
+Do not execute invalid/untrusted files to classify a later condition. These are
+contract categories, not names of an already implemented module API.
+
+| Order | Observation | Primary result |
+| --- | --- | --- |
+| 1 | Invalid facts, OS, privileges, input types/values, old names or unsupported feature request | Applicable prerequisite/input error |
+| 2 | Unsafe or unobservable prefix/required path | Path/safety error |
+| 3 | Absent or suitable dedicated empty prefix | New-install candidate; continue with workspace, capacity and publication/residual checks |
+| 4 | Nonempty prefix with no record | Record error if Ruby exists, otherwise incomplete installation; do not execute/adopt it |
+| 5 | Unreadable or malformed record | Record error |
+| 6 | Valid record but missing Ruby | Incomplete installation |
+| 7 | Recorded version differs | Version mismatch |
+| 8 | Recorded source, placement or build settings differ | Build-contract mismatch |
+| 9 | Safe executable observation fails, times out or returns invalid data | Health-check failure |
+| 10 | Observed version differs from request/record | Version mismatch |
+| 11 | Observed placement or build settings differ | Build-contract mismatch |
+| 12 | Required library/function check fails | Health-check failure |
+| 13 | Healthy identical installation | Proceed to link/residual checks; no build, dependencies or workspace |
 
 Link settings are separate from the build contract; a link-only change must not
 rebuild Ruby. Concurrent installations into the same prefix are unsupported.
@@ -269,14 +338,16 @@ cleanup command to all of `/tmp`, another prefix or unrelated files.
 
 ### Command publication
 
-Links are disabled by default. When explicitly enabled, publish selected allowed
+Links are disabled by default. In v0.2.0, requesting links must stop as
+unsupported before host changes, while disabled-link residual checks still apply.
+Link creation starts with v0.3.0. When explicitly enabled, publish selected allowed
 commands to `/usr/local/bin/<command>`, resolving to the corresponding healthy
 `<prefix>/bin/<command>`. Inspect all selected sources/destinations before creating
 any link. Do not install additional gems to conceal a missing command.
 
 | Setting/state | Required behavior |
 | --- | --- |
-| Links disabled and no applicable existing publication | Leave external paths unchanged |
+| Links disabled and no applicable existing publication | Leave link publication paths unchanged; a permitted new install may still install dependencies or enable CRB |
 | Links enabled, all sources healthy and destinations absent | Create after checking the entire set |
 | Existing link resolves to the correct command in this prefix | Reuse without unnecessary changes |
 | Regular file, another Ruby's link, broken link or unresolvable state | Stop; no forced replacement or automatic deletion |
@@ -290,6 +361,12 @@ resolved targets. Do not rely only on an installation record's list or infer who
 created a link. Do not alter PATH, profiles, sudoers or `secure_path`.
 Use `/opt/ruby/bin/ruby` (or the configured prefix) explicitly; `ruby` and
 `sudo ruby` may resolve to different installations.
+
+From v0.2.0, callers must migrate to absolute paths under `<prefix>/bin` or
+explicitly manage their task's PATH. This also applies to commands added later by
+gems, such as `passenger-install-apache2-module`: they are outside the nine allowed
+public names. Enabling links in v0.3.0 does not publish those extra commands or
+automatically update Redmine/Passenger Roles and playbooks.
 
 The pinned target's pre-fixture baseline in
 [CI396, job1604](https://app.circleci.com/pipelines/github/ansible-roles-mamono210/ruby_install/396/workflows/882e5191-bc2c-46bb-83d5-8ef853c942a6/jobs/1604)
@@ -371,7 +448,8 @@ The existing known-warning exception applies only to the fixed controller's
 Collection-list observation, under the identity checks recorded in contract v9
 section 13. It is not a blanket warning exemption for playbooks, lint or tests.
 
-The required Role matrix has six conditions, each including installation,
+For v0.2.0, v0.3.0 and v1.0.0, the required Role matrix has six conditions,
+each including installation,
 functional verification and an identical second run:
 
 | Ruby | Prefix | Standard documentation | Rust in test environment |
@@ -387,7 +465,9 @@ Rust-present conditions still require full builds and build/runtime JIT checks.
 The six conditions are neither a complete Cartesian product nor six fixed CI
 jobs. Preserve the four categories: trailing-whitespace, yamllint, ansible-lint
 and molecule. Run the full matrix sequentially for final code-changing PR
-candidates and release candidates; separate checks that do not require builds.
+candidates and release candidates for these implementation releases; separate
+checks that do not require builds. The v0.1.0 evaluation snapshot has its own
+limited acceptance scope below.
 
 Additional required checks retain the contract's IDs. These are design
 requirements, not names of existing Molecule scenarios or CI jobs:
@@ -401,7 +481,13 @@ requirements, not names of existing Molecule scenarios or CI jobs:
 | T09 | Nine commands and gem basics; documentation on/off; managed `ri` reads standard Ruby class documentation when enabled; no external documentation/gems hide missing output |
 | T10–T11 | openssl/psych/zlib and shared-library loading without environment rescue; build/runtime JIT disabled with and without Rust |
 | T12–T14 | Owned-workspace success/failure handling, fixed-ref Role distribution, cleanup of test containers with required failure evidence retained |
-| T15 | Every old name, wrong types, invalid versions, checksum/URL errors, command-list errors, invalid/overlapping/shared/unsafe paths, unwritable or missing workspace and known noexec; valid-input controls also pass |
+| T15 | The five rejected old names, including externally visible definitions; wrong types, invalid versions, checksum/URL errors, command-list errors and unsafe paths; workspace environment failures for new installs and healthy-rerun controls that skip those checks |
+
+Phase 2 integration tests are planned as a Molecule scenario, with unit tests
+also running on target Python 3.9 and module discovery/lint checked in the fixed
+environments. These scenarios and CI jobs are not implemented yet. Interim
+preflight-only tests do not replace the normal four CI categories required by
+v0.2.0 and later. A workflow that did not run is not a passing test.
 
 The initial full-Role test planning basis is target CPU1, memory limit 2 GiB,
 no additional swap, make jobs 1, one condition at a time and no automatic retries.
@@ -410,7 +496,8 @@ The initial planning allowance is 1500 credits and a 20-minute stop-decision
 threshold per build condition. Before any run, check current pricing, balance,
 resource class and the complete job estimate, and implement timeout/child-process
 termination, failure evidence and cleanup. These values are not billing caps or
-authorization to trigger CI; do not silently shrink required coverage to fit.
+authorization to trigger CI or a combined budget for three releases. On OOM or
+timeout, retain evidence and stop; do not silently reduce coverage or rerun.
 
 #### Evaluation completed before Role implementation
 
@@ -434,25 +521,51 @@ Role. Its artifact intentionally keeps `role_verified`, `p1_04_complete` and
 
 ### Release and compatibility
 
-Role `v1.0.0` is distinct from Ruby 3.4.12 or 4.0.9. The adopted release identifiers
-are Redmine Version `1.0.0` and Git tag `v1.0.0`, with a GitHub Release. These names
-do not imply that the Version, tag or Release exists. Tickets are grouped by
-target version; `release_tag` remains unused. Galaxy publication is deferred.
+Role release numbers are distinct from Ruby 3.4.12 or 4.0.9. The adopted
+stages retain Phase 1–7 responsibilities; verification, documentation and
+publication (Phases 5–7) apply to each release's scope.
+
+| Planned Role release | Scope and acceptance boundary |
+| --- | --- |
+| v0.1.0 | Phase 1 specification/evaluation development snapshot. Reconciled specifications, fixed evaluation references, LICENSE/meta/CHANGELOG/Release Notes and fixed-ref retrieval. Explicitly label the included legacy Role and unimplemented new contract. Candidate documentation/static checks and affected evaluation regressions are required; unchanged evaluation sources/conditions may reference existing evidence at its original commit. No claim of real Role installation or full four-category contract compliance. |
+| v0.2.0 | Phases 2+3: installation, complete post-install checks, Role-generated records, healthy identical rerun, invalid-state protection and owned workspace management. Six real Role conditions, normal four CI categories, applicable T01–T06 and T09–T15, T07 input validation and T08 disabled-link residual protection. Link-ON requests stop before changes. Include minimum manual recovery and migration instructions. |
+| v0.3.0 | Phase 4: full T07/T08 link publication and failure handling; v0.2.0 regressions, six real Role conditions and normal four CI categories. Prove rerun/link addition using records actually written by v0.2.0. Extra gem commands remain outside publication scope. |
+| v1.0.0 | Complete T01–T15, six real Role conditions, normal four CI categories, v0.2.0/v0.3.0 prefix/link compatibility, distribution and migration/recovery examples. Finalize the public contract without adding unrelated features to the completion criteria. |
+
+Redmine Version identifiers are `0.1.0`, `0.2.0`, `0.3.0` and `1.0.0`, paired
+with Git tags `v0.1.0`, `v0.2.0`, `v0.3.0` and `v1.0.0`. The 0.x versions use
+GitHub Pre-release; v1.0.0 uses GitHub Release. These are planned identifiers,
+not a claim that the corresponding objects exist. Tickets use target versions;
+`release_tag` remains unused and Galaxy publication is deferred.
+
+Phase 2 and Phase 3 share record assembly/validation and may be developed in
+parallel. Their end-to-end installation/rerun acceptance is joined at v0.2.0.
+Freeze the record format before v0.2.0 publication and verify compatibility in
+later releases; do not publish a throwaway intermediate format. A preflight-only
+intermediate Role is not an installation-capable release. Later functional
+releases remain subsets of the final contract without temporary public inputs.
 
 Public names, types, defaults, permitted values, semantics, supported environment,
-state decisions and failure boundaries form the compatibility contract. Use a
-major release for incompatible changes, minor for compatible additions or
-deprecation notices, and patch for compatible fixes. Judge default changes by
-their actual compatibility: a Ruby patch update does not automatically make a
+state decisions and failure boundaries form the compatibility contract. From
+v1.0.0, use a major release for incompatible changes, minor for compatible
+additions or deprecation notices, and patch for compatible fixes. During 0.x,
+state changes and migration impacts explicitly and preserve the adopted record
+compatibility requirements. A Ruby patch update does not automatically make a
 Role default-version change compatible, since it can stop an existing prefix.
 
-Before release, align defaults/tasks/metadata, examples, CHANGELOG, required tests
-and this contract; verify distribution from the fixed ref in another directory.
-Phase 1 completion requires the adopted references, P1-01 through P1-05 evidence
-and repository contract to be reconciled. Phase 2 implementation has not started
-in this documentation proposal. P1-06, human confirmation of copyright ownership,
-code provenance and LICENSE text, is required before publication, not before
-Phase 2. None of the evaluation evidence establishes release readiness.
+Phase 1's technical completion was adopted in r51 (contract v10 / Roadmap v11).
+The r55 decisions (contract v11 / Roadmap v12) supplement that specification;
+this README incorporates them without reclassifying evaluation as Role proof.
+Phase 2/3 implementation and real Role validation remain outstanding.
+
+Before each publication, align that release's implementation claims, metadata,
+examples, CHANGELOG, tests and release notes; verify the candidate's fixed-ref
+distribution and then retrieval of the published tag in a separate directory.
+P1-06, human confirmation of copyright ownership, code provenance and final
+LICENSE text, is required before the first v0.1.0 publication, including a tag-only
+publication. It need not block preparing the Roadmap or Phase 2 implementation.
+The v0.1.0 candidate and its exact validation jobs/budget remain to be prepared.
+None of the evaluation evidence alone establishes release readiness.
 
 ## Earlier implementation snapshot
 
