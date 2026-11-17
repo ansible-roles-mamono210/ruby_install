@@ -2,7 +2,8 @@
 
 # ruby_install
 
-An Ansible role for installing Ruby from source on CentOS Stream 9.
+A development snapshot of specifications and evaluation tooling for a
+future Ruby installation Role on CentOS Stream 9.
 
 > **Development status:** the v1.0.0 contract below describes the implementation
 > target. The current Role in `tasks/main.yml` and `defaults/main.yml` still uses
@@ -11,18 +12,44 @@ An Ansible role for installing Ruby from source on CentOS Stream 9.
 > establish Role installation, idempotence, or release readiness. The badge above
 > reports the `main` branch, not completion of the v1.0.0 contract.
 
-The planned v0.1.0 is a development snapshot of Phase 1 specifications,
-evaluation tooling and evidence. It does not deliver an implementation of the
-new Role contract. The release boundaries below distinguish this snapshot from
-the installation and publication features planned for later versions.
+## v0.1.0 development snapshot
+
+**Preparation status: not published; final candidate SHA and fixed-image CI pending.**
+v0.1.0 fixes the Phase 1 specification, evaluation tooling and historical
+evidence. The included legacy Role does not implement the new contract.
+The first planned installation-capable version under that contract is v0.2.0.
+Do not run this snapshot as an implementation of the new public variables,
+verified acquisition, managed-prefix protection or idempotence requirements.
+
+- [Release notes and candidate checks](docs/releases/v0.1.0.md)
+- [Phase 1 evidence, fixed source commits and limits](docs/p1-evidence.md)
+- [Changelog](CHANGELOG.md)
+
+To inspect the specification baseline now, retrieve its full commit in a new
+directory. This command retrieves the pre-release-preparation baseline, not a
+published v0.1.0 or the final candidate:
+
+```sh
+git clone https://github.com/ansible-roles-mamono210/ruby_install.git ruby-install-spec
+cd ruby-install-spec
+git checkout --detach 55a7ebfa6c6358ea03563d9ab6741921b2be03dc
+git rev-parse HEAD
+```
+
+Candidate checks use the complete candidate SHA, record file hashes and retrieve
+that SHA independently. After publication, the tag must be compared with that
+approved SHA before using the snapshot. No `v0.1.0` tag is claimed to exist here.
+Metadata does not advertise a tested minimum Ansible version or general EL
+support. Omitting those fields does not imply support for every version.
+The fixed environments below describe evaluations, not legacy Role compatibility.
 
 ## v1.0.0 contract
 
 This section consolidates the adopted technical requirements for v1.0.0. Its
 source is Redmine project 419, `20261108_ruby_100_roadmap_chatgpt_002_contract`
-version 11, sections 14–16. Later explicit decisions take precedence over
+version 12, sections 14–17. Later explicit decisions take precedence over
 earlier candidate values and historical status descriptions. The Roadmap,
-`20261108_ruby_100_roadmap_chatgpt_001_draft` version 12, owns phase order and
+`20261108_ruby_100_roadmap_chatgpt_001_draft` version 13, owns phase order and
 the staged release scope. This README is the repository
 destination for the technical contract; source code and test evidence determine
 what has actually been implemented and verified.
@@ -561,10 +588,14 @@ Phase 2/3 implementation and real Role validation remain outstanding.
 Before each publication, align that release's implementation claims, metadata,
 examples, CHANGELOG, tests and release notes; verify the candidate's fixed-ref
 distribution and then retrieval of the published tag in a separate directory.
-P1-06, human confirmation of copyright ownership, code provenance and final
-LICENSE text, is required before the first v0.1.0 publication, including a tag-only
-publication. It need not block preparing the Roadmap or Phase 2 implementation.
-The v0.1.0 candidate and its exact validation jobs/budget remain to be prepared.
+P1-06 requires human confirmation of copyright ownership and code provenance,
+and a finalized LICENSE before the first v0.1.0 publication, including a tag-only
+publication. The holder confirmed the existing code was self-written; this
+candidate includes the BSD-3-Clause LICENSE with the confirmed holder and year.
+This completes the candidate's license preparation, not its release validation.
+The v0.1.0 check configuration is described in the release notes. Its fixed
+images, real execution results, budget and final candidate remain to be verified
+before publication; local preparation is not completion of those conditions.
 None of the evaluation evidence alone establishes release readiness.
 
 ## Earlier implementation snapshot
@@ -588,9 +619,15 @@ used in the current tasks. The earlier README's `3.0/ruby-3.2.3.tar.gz` path did
 not match the default's `3.2` path. Its `Requirements: None` statement is replaced
 by the explicit requirements above.
 
-## License status
+## License
 
-The adopted identifier for the future release is **BSD-3-Clause**. The earlier
-README said only `BSD`, and current metadata says `license (BSD, MIT)`. Human
-confirmation of ownership/provenance and the final LICENSE text is still pending.
-This README does not settle those conflicting labels or create a license grant.
+This source is licensed under [BSD-3-Clause](LICENSE).
+
+Copyright (c) 2021 mamono210.
+
+The holder confirmed that the existing code was self-written and selected the
+initial-commit year for this notice. The repository's root commit is
+[`83777ecb4b1daf1f033020ac65321d2d48701b90`](https://github.com/ansible-roles-mamono210/ruby_install/commit/83777ecb4b1daf1f033020ac65321d2d48701b90),
+dated 2021-03-26. The LICENSE and metadata now use the same identifier, replacing
+the earlier ambiguous labels. This license does not imply completion of the
+new Role contract or publication of v0.1.0.

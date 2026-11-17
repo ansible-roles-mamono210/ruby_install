@@ -2,13 +2,8 @@
 galaxy_info:
   role_name: ruby_install
   author: mamono210
-  description: Ruby installation for Linux.
+  description: Phase 1 specification and evaluation development snapshot; new Role contract unimplemented.
   company: no name
-  license: "license (BSD, MIT)"
-  min_ansible_version: 13.2.0
-  platforms:
-    - name: EL
-      release:
-        - 9
+  license: BSD-3-Clause
   galaxy_tags: []
 dependencies: []

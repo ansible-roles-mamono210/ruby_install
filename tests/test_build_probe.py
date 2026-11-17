@@ -809,22 +809,34 @@ class HostTests(unittest.TestCase):
                 return not evaluate(expr['not'], values)
             a, b = expr['equal']
             return evaluate(a, values) == evaluate(b, values)
-        for branch in (host.BRANCH, 'main'):
-            for build in (False, True):
-                for env in (False, True):
-                    values = {'<< pipeline.parameters.run_p1_build_probe >>': build,
-                              '<< pipeline.parameters.run_p1_env_probe >>': env,
-                              '<< pipeline.git.branch >>': branch}
-                    selected = [name for name, workflow in config['workflows'].items()
-                                if isinstance(workflow, dict) and evaluate(workflow['when'], values)]
-                    if branch == host.BRANCH:
-                        expected = ['p1-ruby-build-measurement'] if build and not env else (
-                            ['p1-environment-measurement'] if env and not build else [])
-                        self.assertEqual(selected, expected)
-                        if selected:
-                            self.assertEqual(len(config['workflows'][selected[0]]['jobs']), 1)
-                    else:
-                        self.assertEqual(selected, ['build'] if not env and not build else [])
+        self.assertFalse(config['parameters']['run_v010_release_checks']['default'])
+        for branch in (host.BRANCH, 'main', 'feature/example', ''):
+            for release in (False, True):
+                for build in (False, True):
+                    for env in (False, True):
+                        with self.subTest(branch=branch, release=release, build=build, env=env):
+                            values = {'<< pipeline.parameters.run_p1_build_probe >>': build,
+                                      '<< pipeline.parameters.run_p1_env_probe >>': env,
+                                      '<< pipeline.parameters.run_v010_release_checks >>': release,
+                                      '<< pipeline.git.branch >>': branch}
+                            selected = [name for name, workflow in config['workflows'].items()
+                                        if isinstance(workflow, dict) and evaluate(workflow['when'], values)]
+                            if release:
+                                expected = ['v010-release-checks'] if (
+                                    branch == host.BRANCH and not build and not env) else []
+                            elif branch == host.BRANCH:
+                                expected = ['p1-ruby-build-measurement'] if build and not env else (
+                                    ['p1-environment-measurement'] if env and not build else [])
+                            else:
+                                expected = ['build'] if not env and not build else []
+                            self.assertEqual(selected, expected)
+                            if selected and selected[0].startswith('p1-'):
+                                self.assertEqual(len(config['workflows'][selected[0]]['jobs']), 1)
+        jobs = config['workflows']['v010-release-checks']['jobs']
+        self.assertEqual([next(iter(job)) for job in jobs],
+                         ['v010-static-and-probes', 'v010-lint-controls'])
+        for job in jobs:
+            self.assertEqual(next(iter(job.values()))['filters']['tags']['ignore'], '/.*/')
 
     def test_missing_permission_does_not_open_output_or_call_docker(self):
         with patch.object(host.os, 'open') as output, patch.object(host.subprocess, 'run') as run, \

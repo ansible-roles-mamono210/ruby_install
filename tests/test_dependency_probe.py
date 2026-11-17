@@ -1049,7 +1049,8 @@ class HostTests(unittest.TestCase):
         self.assertFalse(config['parameters']['run_p1_env_probe']['default'])
         workflow = config['workflows']['p1-environment-measurement']
         self.assertEqual(workflow['jobs'], ['p1-environment'])
-        self.assertEqual(workflow['when']['and'], ['<< pipeline.parameters.run_p1_env_probe >>',
+        self.assertEqual(workflow['when']['and'], [
+            {'not': '<< pipeline.parameters.run_v010_release_checks >>'}, '<< pipeline.parameters.run_p1_env_probe >>',
                          {'not': '<< pipeline.parameters.run_p1_build_probe >>'},
                          {'equal': [h.BRANCH, '<< pipeline.git.branch >>']}])
         job = config['jobs']['p1-environment']
