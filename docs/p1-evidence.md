@@ -8,11 +8,15 @@ Specification baseline: [55a7ebfa6c6358ea03563d9ab6741921b2be03dc](https://githu
 The snapshot retains later evaluation scripts/tests; individual historical runs
 used the commits below. Do not substitute the snapshot SHA for their source SHA.
 The candidate guard compares all paths with the baseline and permits seven
-distribution-document/config paths, three hash-pinned workflow-test paths and
-the CI-only `scripts/release/check_v010.py` to differ. The three tests add the new exclusion and mixed-parameter coverage;
-Phase 1 evaluation scripts and all other tests remain unchanged. This preserves the
-original build/acquisition measurements at their original source commits; only
-the candidate's CI-condition regression assertions need to be rerun.
+distribution-document/config paths, three hash-pinned regression-test paths and
+the CI-only `scripts/release/check_v010.py` to differ. The three test files add
+the new exclusion and mixed-parameter coverage.
+The runtime host mock also follows `tempfile.gettempdir()` so a dedicated CI
+`TMPDIR` works with the same assertions;
+Phase 1 evaluation scripts and all other tests remain unchanged. This preserves
+the original build/acquisition measurements at their original source commits.
+The candidate's regression checks still require verification in the fixed CI
+environments.
 That does not claim all old probe
 revisions are byte-identical to the latest scripts.
 

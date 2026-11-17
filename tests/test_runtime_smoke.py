@@ -864,7 +864,9 @@ class RuntimeHostTests(unittest.TestCase):
 
         def command(argv, *args, **kwargs):
             if '/p1/runtime_controller.py' in argv:
-                mount = next(x for x in argv if x.startswith('type=bind,src=/tmp/ruby-p1-r11-'))
+                # The host uses tempfile's configured root, including a CI-owned TMPDIR.
+                prefix = 'type=bind,src=' + str(Path(tempfile.gettempdir()) / 'ruby-p1-r11-')
+                mount = next(x for x in argv if x.startswith(prefix))
                 directory = Path(mount.split('src=', 1)[1].split(',dst=', 1)[0])
                 self.assertEqual([x.name for x in (directory / 'callback_plugins').iterdir()], ['runtime_callback.py'])
                 return controller_rc, json.dumps(runtime)

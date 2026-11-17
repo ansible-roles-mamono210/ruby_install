@@ -19,7 +19,7 @@ DISTRIBUTION = {
     "README.md", "meta/main.yml", "LICENSE", "CHANGELOG.md",
     "docs/releases/v0.1.0.md", "docs/p1-evidence.md", ".circleci/config.yml",
 }
-TEST_HASHES = {'tests/test_dependency_probe.py': '7716459d9b4457329a74184a53ff3c2dfc084a81aff490a69524f4c21511aa94', 'tests/test_runtime_smoke.py': 'c078ae16ae857c26b75e08467e1d6fc0c757cc68a8f3b176c1137f13b07833db', 'tests/test_build_probe.py': 'cf44b31681ddfb3f3c62fb7494ab3298d8700586cf8ee55358edcf6293d52da8'}
+TEST_HASHES = {'tests/test_dependency_probe.py': '7716459d9b4457329a74184a53ff3c2dfc084a81aff490a69524f4c21511aa94', 'tests/test_runtime_smoke.py': 'efa062d15350fdb9d1232ee56f8b360d5a7d4c261bc828c60fe63e503704d9b5', 'tests/test_build_probe.py': 'cf44b31681ddfb3f3c62fb7494ab3298d8700586cf8ee55358edcf6293d52da8'}
 ALLOWED = DISTRIBUTION | set(TEST_HASHES) | {"scripts/release/check_v010.py"}
 LINT_IDS = {
     "test_lint_probe.RealLint.test_live_eight_controls",
@@ -95,11 +95,11 @@ def main():
     REPORT.update(candidate_sha=sha, base_sha=BASE, changed=changed)
     for path, expected_hash in TEST_HASHES.items():
         require(hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected_hash,
-                "workflow regression test hash mismatch")
+                "pinned regression test hash mismatch")
     paths = git("ls-tree", "-r", "--name-only", sha).splitlines()
     hashes = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}
     (OUT / "candidate-sha256.json").write_text(json.dumps(hashes, indent=2) + "\n")
-    REPORT["source_guard"] = "seven distribution paths, three hash-pinned workflow tests and the CI checker"
+    REPORT["source_guard"] = "seven distribution paths, three hash-pinned regression test files and the CI checker"
 
     loader = unittest.TestLoader()
     if MODE == "controller":
