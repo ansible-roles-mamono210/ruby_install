@@ -81,7 +81,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Verify adopted variable names and negative controls with fixed lint image
+          name: Verify actual Role variable files and fail-closed controls
           no_output_timeout: 8m
           command: |
             set -euo pipefail
@@ -89,8 +89,8 @@ jobs:
             mkdir -p p1-evidence
             set +e
             timeout --signal=TERM --kill-after=30s 7m \
-              python3 scripts/p1/lint_probe.py \
-              --allow-pull --ephemeral-ci --allow-lint-fixture \
+              python3 scripts/p1/role_vars_probe.py \
+              --allow-pull --ephemeral-ci --allow-role-vars \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e

@@ -1056,8 +1056,8 @@ class HostTests(unittest.TestCase):
         self.assertEqual(job['machine']['image'], 'ubuntu-2204:2023.10.1')
         self.assertEqual(job['resource_class'], 'medium')
         command = job['steps'][1]['run']['command']
-        self.assertIn('scripts/p1/lint_probe.py', command)
-        self.assertIn('--allow-lint-fixture', command)
+        self.assertIn('scripts/p1/role_vars_probe.py', command)
+        self.assertIn('--allow-role-vars', command)
         self.assertNotIn('--allow-rust-install', command)
         self.assertNotIn('--allow-install', command)
         self.assertNotIn('--allow-source-download', command)
