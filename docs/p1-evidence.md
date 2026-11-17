@@ -8,9 +8,9 @@ Specification baseline: [55a7ebfa6c6358ea03563d9ab6741921b2be03dc](https://githu
 The snapshot retains later evaluation scripts/tests; individual historical runs
 used the commits below. Do not substitute the snapshot SHA for their source SHA.
 The candidate guard compares all paths with the baseline and permits seven
-distribution-document/config paths plus three hash-pinned workflow-test paths
-to differ. The three tests add the new exclusion and mixed-parameter coverage;
-evaluation scripts and all other tests remain unchanged. This preserves the
+distribution-document/config paths, three hash-pinned workflow-test paths and
+the CI-only `scripts/release/check_v010.py` to differ. The three tests add the new exclusion and mixed-parameter coverage;
+Phase 1 evaluation scripts and all other tests remain unchanged. This preserves the
 original build/acquisition measurements at their original source commits; only
 the candidate's CI-condition regression assertions need to be rerun.
 That does not claim all old probe
