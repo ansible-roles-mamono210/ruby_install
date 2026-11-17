@@ -1056,13 +1056,14 @@ class HostTests(unittest.TestCase):
         self.assertEqual(job['machine']['image'], 'ubuntu-2204:2023.10.1')
         self.assertEqual(job['resource_class'], 'medium')
         command = job['steps'][1]['run']['command']
-        self.assertIn('scripts/p1/role_vars_probe.py', command)
-        self.assertIn('--allow-role-vars', command)
+        self.assertIn('scripts/p1/ansible_download_probe.py', command)
+        self.assertIn('--allow-ci-docker-api', command)
+        self.assertIn('--allow-ansible-download', command)
         self.assertNotIn('--allow-rust-install', command)
         self.assertNotIn('--allow-install', command)
         self.assertNotIn('--allow-source-download', command)
-        self.assertIn('30s 7m', command)
-        self.assertEqual(job['steps'][1]['run']['no_output_timeout'], '8m')
+        self.assertIn('60s 11m', command)
+        self.assertEqual(job['steps'][1]['run']['no_output_timeout'], '12m')
 
 
 if __name__ == '__main__':

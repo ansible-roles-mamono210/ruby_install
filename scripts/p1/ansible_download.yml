@@ -1,0 +1,82 @@
+---
+- name: Evaluate real Ansible acquisition on a disposable fixture
+  hosts: target
+  gather_facts: false
+  vars:
+    ansible_pipelining: true
+    ansible_remote_tmp: /tmp/ruby-p1-fetch-remote
+    ansible_docker_privileged: false
+    ansible_docker_docker_host: unix:///var/run/docker.sock
+    ansible_docker_timeout: 15
+  tasks:
+    - name: P1 acquisition block
+      block:
+        - name: P1 uri
+          ansible.builtin.uri:
+            url: "{{ p1_url }}"
+            dest: "{{ p1_destination }}"
+            method: GET
+            status_code: [200]
+            follow_redirects: none
+            validate_certs: true
+            ca_path: "{{ p1_ca if p1_ca else omit }}"
+            use_proxy: false
+            use_netrc: false
+            return_content: false
+            decompress: false
+            timeout: 5
+            mode: '0600'
+          no_log: true
+          register: p1_uri
+
+        - name: P1 stat
+          ansible.builtin.stat:
+            path: "{{ p1_destination }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+            get_mime: false
+            get_attributes: false
+            follow: false
+          no_log: true
+          register: p1_stat
+
+        - name: P1 checksum
+          ansible.builtin.assert:
+            that:
+              - p1_stat.stat.isreg
+              - not p1_stat.stat.islnk
+              - p1_stat.stat.checksum == p1_sha256
+            quiet: true
+          no_log: true
+
+        # Test-only witness for reaching the next stage; no extraction or build.
+        - name: P1 gate witness
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_python_interpreter }}"
+              - -I
+              - -B
+              - -c
+              - "import os,sys; f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(f,b'checksum-verified\\n'); os.close(f)"
+              - "{{ p1_destination }}.accepted"
+          changed_when: true
+          no_log: true
+          register: p1_gate
+      rescue:
+        - name: P1 remember failure stage
+          ansible.builtin.set_fact:
+            p1_failure_stage: "{{ ansible_failed_task.name }}"
+          no_log: true
+      always:
+        - name: P1 publish acquisition result
+          ansible.builtin.debug:
+            msg:
+              schema: ruby-p1-ansible-acquisition-case-r49
+              failure_stage: "{{ p1_failure_stage | default('none') }}"
+              http_status: "{{ p1_uri.status | default(-999) }}"
+              uri_failed: "{{ p1_uri is failed }}"
+              tls_verification_failed: "{{ 'CERTIFICATE_VERIFY_FAILED' in (p1_uri.msg | default('')) }}"
+              stat_ran: "{{ p1_stat is defined }}"
+              checksum_matches: "{{ (p1_stat.stat.checksum | default('')) == p1_sha256 }}"
+              gate_reached: "{{ (p1_gate.rc | default(-1)) == 0 }}"
+          no_log: false

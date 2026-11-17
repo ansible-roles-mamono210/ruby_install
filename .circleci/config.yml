@@ -81,16 +81,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Verify actual Role variable files and fail-closed controls
-          no_output_timeout: 8m
+          name: Verify actual Ansible acquisition with fixed controller and target
+          no_output_timeout: 12m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
-            timeout --signal=TERM --kill-after=30s 7m \
-              python3 scripts/p1/role_vars_probe.py \
-              --allow-pull --ephemeral-ci --allow-role-vars \
+            timeout --signal=TERM --kill-after=60s 11m \
+              python3 scripts/p1/ansible_download_probe.py \
+              --allow-pull --ephemeral-ci --allow-ci-docker-api --allow-ansible-download \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
