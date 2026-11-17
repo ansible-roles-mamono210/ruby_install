@@ -1,4 +1,4 @@
-"""Offline boundary tests for r36; these are not Ruby build or CI results."""
+"""Offline boundary tests for r38; these are not Ruby build or CI results."""
 import copy
 import gzip
 import hashlib
@@ -28,6 +28,121 @@ source = module('source_container_probe')
 installer = module('install_container_probe')
 dependency = rust_host.profile(module('dependency_container_probe'))
 dependency_host = module('dependency_probe')
+
+
+def phase_snapshot(at=0, max_events=0):
+    return {'at_seconds': at, 'current_bytes': 100, 'lifetime_peak_bytes': 200,
+            'stat_bytes': {'anon': 40, 'file': 60},
+            'events': {'source': '/sys/fs/cgroup/memory.events.local',
+                       'counters': {'low': 0, 'high': 0, 'max': max_events, 'oom': 0, 'oom_kill': 0}}}
+
+
+def phase_fixture():
+    return [{'name': name, 'sample_count': 2, 'current_unavailable_samples': 0,
+             'current_peak_bytes_sampled': 100, 'before': phase_snapshot(i * 2),
+             'after': phase_snapshot(i * 2 + 1, 2), 'completed': True,
+             'events_delta': {'low': 0, 'high': 0, 'max': 2, 'oom': 0, 'oom_kill': 0}}
+            for i, name in enumerate(host.PHASE_NAMES)]
+
+
+class PhaseMemoryTests(unittest.TestCase):
+    def test_scalar_unavailable_or_malformed_is_not_zero(self):
+        for value in (None, '', 'max', '-1', '123secret', str(2 ** 63)):
+            with self.subTest(value=value), patch.object(worker, 'memory_text', return_value=value):
+                self.assertIsNone(worker.memory_scalar('memory.current'))
+        with patch.object(worker, 'memory_text', return_value='0\n'):
+            self.assertEqual(worker.memory_scalar('memory.current'), 0)
+
+    def test_read_is_bounded_and_errors_do_not_escape(self):
+        for error in (FileNotFoundError('PRIVATE'), PermissionError('PRIVATE')):
+            with patch.object(worker.Path, 'open', side_effect=error):
+                self.assertIsNone(worker.memory_text('memory.current'))
+        with patch.object(worker.Path, 'open', return_value=io.StringIO('1' * 8193)):
+            self.assertIsNone(worker.memory_text('memory.current'))
+
+    def test_stat_uses_names_not_order_and_drops_unknown_fields(self):
+        with patch.object(worker, 'memory_text', return_value='file 6\nsecret PRIVATE\nanon 4\n'):
+            self.assertEqual(worker.memory_stat_snapshot(), {'file': 6, 'anon': 4})
+        for text in ('anon 4\n', 'anon 4\nfile 6\nanon 5', 'anon -1\nfile 6'):
+            with patch.object(worker, 'memory_text', return_value=text):
+                self.assertIsNone(worker.memory_stat_snapshot())
+
+    def test_phase_keeps_boundary_events_and_sampled_current_separate(self):
+        meter = worker.Meter('/unused')
+        samples = [phase_snapshot(0, 10), phase_snapshot(1, 12), phase_snapshot(2, 15)]
+        samples[1]['current_bytes'] = 150
+        with patch.object(worker, 'memory_snapshot', side_effect=samples):
+            meter.begin_phase('dependencies'); meter.sample_memory(); meter.end_phase(True)
+        row = meter.data['memory_phases'][0]
+        self.assertEqual(row['events_delta']['max'], 5)
+        self.assertEqual(row['current_peak_bytes_sampled'], 150)
+        self.assertEqual(row['after']['lifetime_peak_bytes'], 200)
+        self.assertEqual(row['sample_count'], 3)
+        self.assertIsNone(meter.active_phase)
+
+    def test_missing_events_source_change_or_counter_reset_has_no_delta(self):
+        before = phase_snapshot()['events']
+        for after in (None, dict(before, source='/sys/fs/cgroup/memory.events'),
+                      dict(before, counters=dict(before['counters'], max=-1))):
+            self.assertIsNone(worker.event_delta(before, after))
+
+    def test_run_failure_retains_phase_end_and_original_error(self):
+        meter = worker.Meter('/unused')
+        with patch.object(worker, 'memory_snapshot', side_effect=[phase_snapshot(), phase_snapshot(1, 3)]), \
+                patch.object(worker, 'run_command', side_effect=worker.Stop('BUILD_TIME_LIMIT')):
+            with self.assertRaisesRegex(worker.Stop, 'BUILD_TIME_LIMIT'):
+                worker.run('configure', [], '/', '/', {'runs': []}, meter, 1, 1)
+        row = meter.data['memory_phases'][0]
+        self.assertFalse(row['completed']); self.assertEqual(row['events_delta']['max'], 3)
+
+    def test_missing_current_counts_as_unavailable_not_zero(self):
+        meter = worker.Meter('/unused'); snapshot = phase_snapshot()
+        snapshot['current_bytes'] = None
+        with patch.object(worker, 'memory_snapshot', return_value=snapshot):
+            meter.begin_phase('dependencies'); meter.end_phase(False)
+        row = meter.data['memory_phases'][0]
+        self.assertEqual(row['current_unavailable_samples'], 2)
+        self.assertIsNone(row['current_peak_bytes_sampled'])
+        self.assertIsNotNone(host.checked_memory_phases([row]))
+        self.assertIsNone(host.checked_memory_phases([row], complete=True))
+
+    def test_host_rejects_missing_reordered_forged_and_unbounded_records(self):
+        self.assertIsNotNone(host.checked_memory_phases(phase_fixture(), complete=True))
+        for mode in ('missing', 'reorder', 'delta', 'bool', 'secret', 'time', 'incomplete'):
+            rows = phase_fixture()
+            if mode == 'missing': rows.pop()
+            if mode == 'reorder': rows[0], rows[1] = rows[1], rows[0]
+            if mode == 'delta': rows[0]['events_delta']['max'] = 999
+            if mode == 'bool': rows[0]['before']['current_bytes'] = True
+            if mode == 'secret': rows[0]['before']['secret'] = 'PRIVATE'
+            if mode == 'time': rows[0]['after']['at_seconds'] = float('nan')
+            if mode == 'incomplete': rows[-1]['completed'] = False
+            with self.subTest(mode=mode):
+                self.assertIsNone(host.checked_memory_phases(rows, complete=True))
+
+    def test_partial_phases_survive_failure_but_unknown_fields_do_not(self):
+        phases = phase_fixture()[:2]; phases[-1]['completed'] = False
+        row = {'resources': {'memory_phases': phases}}
+        self.assertEqual(host.partial_measurements(row)['resources']['memory_phases'], phases)
+        phases[0]['secret'] = 'PRIVATE'
+        self.assertNotIn('PRIVATE', json.dumps(host.partial_measurements(row)))
+
+    def test_diagnostic_requires_explicit_flag_before_output(self):
+        with patch.object(host.os, 'open') as output, patch('builtins.print'):
+            result = host.main(['--output', '/unused', '--allow-pull', '--allow-install',
+                    '--allow-rust-install', '--allow-ci430-replacements',
+                    '--allow-ruby-409-rust-build', '--ephemeral-ci'])
+        self.assertEqual(result, 3); output.assert_not_called()
+
+    def test_timeout_envelope_and_resources(self):
+        config = yaml.safe_load((host.ROOT.parents[1] / '.circleci/config.yml').read_text())
+        run = config['jobs']['p1-ruby-build']['steps'][1]['run']
+        self.assertEqual(run['no_output_timeout'], '16m')
+        self.assertIn('--kill-after=60s 15m', run['command'])
+        self.assertIn('--allow-memory-diagnostic', run['command'])
+        argv = host.arguments(SimpleNamespace(DOCKER=['docker'], TARGET_CONFIG='fixed'), 'name', 'id')
+        self.assertEqual(argv[argv.index('--memory') + 1], '2g')
+        self.assertNotIn('--privileged', argv)
 
 
 def valid_entries():
@@ -395,7 +510,7 @@ class Ruby409RustPresentTests(unittest.TestCase):
                 self.validate(dict(base,condition=dict(base['condition'],**change)))
 
     def test_existing_prefix_stops_before_workspace_or_dependencies(self):
-        with patch.dict(worker.os.environ, {'RUBY_P1_BUILD_PROBE':'r36'}, clear=True), \
+        with patch.dict(worker.os.environ, {'RUBY_P1_BUILD_PROBE':'r38'}, clear=True), \
                 patch.object(worker.os,'getuid',return_value=0), \
                 patch.object(worker.platform,'system',return_value='Linux'), \
                 patch.object(worker.platform,'machine',return_value='x86_64'), \
@@ -611,7 +726,7 @@ class FailureMeasurementTests(unittest.TestCase):
                     patch.object(host.subprocess, 'run', return_value=SimpleNamespace(
                         stdout=json.dumps(value), stderr='', returncode=3)) as docker, patch('builtins.print'):
                 result = host.main(['--output', str(target), '--allow-pull', '--allow-install',
-                    '--allow-rust-install', '--allow-ci430-replacements', '--allow-ruby-409-rust-build', '--ephemeral-ci'])
+                    '--allow-rust-install', '--allow-ci430-replacements', '--allow-ruby-409-rust-build', '--allow-memory-diagnostic', '--ephemeral-ci'])
             saved = json.loads(target.read_text())
         self.assertEqual(result, 3)
         self.assertEqual(saved['status'], 'INCOMPLETE')
@@ -650,7 +765,7 @@ class HostTests(unittest.TestCase):
                               'standard_String_verified': True, 'other_stores_disabled': True},
             'runs': [{'name': n, 'returncode': 1 if n == 'configure-negative' else 0,
                       'elapsed_seconds': 1, 'bytes': 10, 'sha256': 'a' * 64, 'tail': 'diagnostic'} for n in names],
-            'resources': {'sample_count': 10, 'memory_events': None},
+            'resources': {'sample_count': 10, 'memory_events': None, 'memory_phases': phase_fixture()},
             'prefix_size': {'allocated_bytes': 1000000}}
 
     def test_complete_result_passes_and_changed_contract_stops(self):
@@ -712,7 +827,7 @@ class HostTests(unittest.TestCase):
             self.assertNotIn(option, argv)
         self.assertEqual(argv[argv.index('--memory') + 1], '2g')
         self.assertEqual(argv[argv.index('--memory-swap') + 1], '2g')
-        self.assertIn('RUBY_P1_BUILD_PROBE=r36', argv)
+        self.assertIn('RUBY_P1_BUILD_PROBE=r38', argv)
 
     def test_hash_checked_helpers_and_bundle_compile(self):
         for filename in host.HELPERS:

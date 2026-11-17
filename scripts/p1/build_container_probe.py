@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 import time
 
-SCHEMA = 'ruby-p1-build-container-r36'
+SCHEMA = 'ruby-p1-build-container-r38'
 SUCCESS = 'RUBY_409_DOCS_ON_RUST_PRESENT_BUILD_VERIFIED'
 VERSION = '4.0.9'
 PREFIX = '/opt/ruby'
@@ -26,7 +26,7 @@ COMMANDS = ('ruby', 'gem', 'bundle', 'bundler', 'irb', 'erb', 'rdoc', 'ri', 'rak
 CONFIGURE = ('--enable-option-checking=fatal', '--prefix=/opt/ruby',
              '--enable-shared', '--enable-rpath', '--disable-yjit', '--disable-zjit',
              '--enable-install-doc', '--enable-install-rdoc', '--disable-install-capi')
-UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r36'
+UNKNOWN = '--enable-ruby-p1-intentionally-unknown-r38'
 MIN_FREE = 8 * 1024 ** 3
 MAX_LOG = 64 * 1024 ** 2
 TAIL_BYTES = 16384
@@ -60,7 +60,7 @@ def mount_for(path, text):
 
 
 def preflight():
-    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r36' and os.getuid() == 0
+    need(os.environ.get('RUBY_P1_BUILD_PROBE') == 'r38' and os.getuid() == 0
          and platform.system() == 'Linux' and platform.machine() == 'x86_64'
          and platform.python_version() == '3.9.19' and Path('/.dockerenv').is_file(), 'IDENTITY')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
@@ -115,7 +115,7 @@ def download(source, directory, row):
     path = Path(directory) / 'source.tar.gz'
     try:
         connection.request('GET', fixed[1], headers={'Accept-Encoding': 'identity',
-                           'User-Agent': 'ruby-p1-build-measurement-r36'})
+                           'User-Agent': 'ruby-p1-build-measurement-r38'})
         response = connection.getresponse()
         row['http_status'] = response.status
         need(response.status == 200, 'SOURCE_HTTP_STATUS_OR_REDIRECT')
@@ -230,18 +230,110 @@ def memory_events_snapshot():
     return None  # Missing/invalid evidence must never become zero events.
 
 
+MEMORY_STAT_KEYS = {'anon', 'file', 'kernel', 'kernel_stack', 'pagetables',
+                    'sock', 'shmem', 'file_mapped', 'file_dirty', 'file_writeback',
+                    'slab_reclaimable', 'slab_unreclaimable'}
+
+
+def memory_text(name):
+    # Fixed, bounded, read-only cgroup files. Never return exception strings.
+    try:
+        with (Path('/sys/fs/cgroup') / name).open('r', encoding='ascii') as handle:
+            text = handle.read(8193)
+        return text if len(text) <= 8192 else None
+    except (OSError, UnicodeError):
+        return None
+
+
+def memory_scalar(name):
+    text = memory_text(name)
+    if text is not None and re.fullmatch(r'[0-9]{1,19}', text.strip()):
+        value = int(text.strip())
+        if value <= 2 ** 63 - 1:
+            return value
+    return None
+
+
+def memory_stat_snapshot():
+    text = memory_text('memory.stat')
+    if text is None:
+        return None
+    result = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] not in MEMORY_STAT_KEYS:
+            continue
+        if (len(fields) != 2 or fields[0] in result or
+                re.fullmatch(r'[0-9]{1,19}', fields[1]) is None or
+                int(fields[1]) > 2 ** 63 - 1):
+            return None
+        result[fields[0]] = int(fields[1])
+    return result if {'anon', 'file'} <= set(result) else None
+
+
+def memory_snapshot(origin):
+    return {'at_seconds': round(time.monotonic() - origin, 6),
+            'current_bytes': memory_scalar('memory.current'),
+            'lifetime_peak_bytes': memory_scalar('memory.peak'),
+            'stat_bytes': memory_stat_snapshot(), 'events': memory_events_snapshot()}
+
+
+def event_delta(before, after):
+    if (before is None or after is None or before['source'] != after['source'] or
+            set(before['counters']) != set(after['counters']) or
+            any(after['counters'][k] < v for k, v in before['counters'].items())):
+        return None
+    return {k: after['counters'][k] - v for k, v in before['counters'].items()}
+
+
 class Meter:
     def __init__(self, workspace):
         self.workspace = workspace
+        self.origin = time.monotonic()
+        self.active_phase = None
         self.data = {'sample_count': 0, 'sample_interval_seconds': 5,
                      'workspace_peak_allocated_bytes_sampled': 0,
                      'prefix_peak_allocated_bytes_sampled': 0,
                      'combined_peak_allocated_bytes_sampled': 0,
                      'minimum_free_bytes_sampled': shutil.disk_usage('/tmp').free,
                      'memory_peak_bytes': None, 'memory_peak_source': 'unavailable',
-                     'memory_events': None}
+                     'memory_events': None, 'memory_phases': []}
+
+    def sample_memory(self):
+        snapshot = memory_snapshot(self.origin)
+        if self.active_phase is not None:
+            row = self.active_phase
+            row['sample_count'] += 1
+            current = snapshot['current_bytes']
+            if current is None:
+                row['current_unavailable_samples'] += 1
+            else:
+                peak = row['current_peak_bytes_sampled']
+                row['current_peak_bytes_sampled'] = current if peak is None else max(peak, current)
+        return snapshot
+
+    def begin_phase(self, name):
+        need(self.active_phase is None and len(self.data['memory_phases']) < 18,
+             'MEMORY_PHASE_SEQUENCE')
+        row = {'name': name, 'sample_count': 0, 'current_unavailable_samples': 0,
+               'current_peak_bytes_sampled': None, 'before': None, 'after': None,
+               'events_delta': None, 'completed': False}
+        self.data['memory_phases'].append(row)
+        self.active_phase = row
+        row['before'] = self.sample_memory()
+
+    def end_phase(self, completed):
+        if self.active_phase is not None:
+            row = self.active_phase
+            try:
+                row['after'] = self.sample_memory()
+                row['events_delta'] = event_delta(row['before']['events'], row['after']['events'])
+                row['completed'] = completed
+            finally:
+                self.active_phase = None
 
     def sample(self):
+        self.sample_memory()
         self.data['memory_events'] = memory_events_snapshot()
         workspace, prefix = size_tree(self.workspace), size_tree(PREFIX)
         self.data['sample_count'] += 1
@@ -269,6 +361,17 @@ def clean_env(home):
 
 
 def run(name, argv, cwd, directory, report, meter, timeout, end, require_success=True):
+    meter.begin_phase(name)
+    completed = False
+    try:
+        result = run_command(name, argv, cwd, directory, report, meter, timeout, end, require_success)
+        completed = True
+        return result
+    finally:
+        meter.end_phase(completed)
+
+
+def run_command(name, argv, cwd, directory, report, meter, timeout, end, require_success=True):
     path = Path(directory) / (name + '.log')
     start = time.monotonic()
     budget = min(timeout, end - start)
@@ -409,6 +512,8 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
            'imported_key_fingerprints': [], 'root_free_bytes_before': shutil.disk_usage('/').free}
     report['dependencies'] = dep
     begin = time.monotonic()
+    meter.begin_phase('dependencies')
+    dependency_completed = False
     signal.alarm(max(1, min(900, int(end - begin))))
     try:
         with dependency.silent_dependencies():
@@ -418,7 +523,9 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
             import rpm
             need(str(dnf.__version__) == '4.14.0' and str(rpm.__version__) == '4.16.1.3', 'DEPENDENCY_IDENTITY')
             rust_worker.execute(installer, dependency, dnf, rpm, expected, directory, dep)
+        dependency_completed = True
     finally:
+        meter.end_phase(dependency_completed)
         signal.alarm(max(1, int(end - time.monotonic())))
     dep['elapsed_seconds'] = round(time.monotonic() - begin, 3)
     need(dep.get('status') == rust_worker.SUCCESS and dep.get('rust_installed') is True
@@ -428,9 +535,21 @@ def evaluate(source, installer, dependency, expected, report, directory, meter, 
     report['rust_present_after_dependencies'] = True
     report['stage'] = 'download'
     report['source'] = {'version': VERSION, 'sha256_expected': SOURCE_SHA}
-    archive = download(source, directory, report['source'])
+    meter.begin_phase('download')
+    completed = False
+    try:
+        archive = download(source, directory, report['source'])
+        completed = True
+    finally:
+        meter.end_phase(completed)
     report['stage'] = 'extract'
-    extracted = extract(source, archive, Path(directory) / 'extracted', report['source']['archive'])
+    meter.begin_phase('extract')
+    completed = False
+    try:
+        extracted = extract(source, archive, Path(directory) / 'extracted', report['source']['archive'])
+        completed = True
+    finally:
+        meter.end_phase(completed)
     report['source']['extraction_verified'] = True
     meter.sample()
     build = Path(directory) / 'build'
@@ -497,13 +616,13 @@ def main(source, installer, dependency, expected, rust_worker):
     def expired(_sig, _frame):
         raise Stop('BUILD_TIME_LIMIT')
     previous_alarm = signal.signal(signal.SIGALRM, expired)
-    signal.alarm(2250)
+    signal.alarm(720)
     try:
         report['preflight'] = preflight()
         os.umask(0o077)
-        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r36-', dir='/tmp')
+        directory = tempfile.mkdtemp(prefix='ruby-p1-build-r38-', dir='/tmp')
         meter = Meter(directory)
-        evaluate(source, installer, dependency, expected, report, directory, meter, start + 2250, rust_worker)
+        evaluate(source, installer, dependency, expected, report, directory, meter, start + 720, rust_worker)
     except Exception as error:
         report['reason'] = str(error) if type(error) in (Stop, installer.Stop, source.Stop, rust_worker.Stop) else 'API_OR_RUNTIME_ERROR'
         report['error_type'] = type(error).__name__
