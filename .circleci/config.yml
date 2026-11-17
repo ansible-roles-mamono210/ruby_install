@@ -81,7 +81,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Verify checksum and redirect guards over live loopback TLS
+          name: Verify adopted variable names and negative controls with fixed lint image
           no_output_timeout: 8m
           command: |
             set -euo pipefail
@@ -89,8 +89,8 @@ jobs:
             mkdir -p p1-evidence
             set +e
             timeout --signal=TERM --kill-after=30s 7m \
-              python3 scripts/p1/download_guard_probe.py \
-              --allow-pull --ephemeral-ci --allow-live-tls-fixture \
+              python3 scripts/p1/lint_probe.py \
+              --allow-pull --ephemeral-ci --allow-lint-fixture \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
