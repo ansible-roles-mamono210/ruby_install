@@ -22,7 +22,7 @@ HELPERS = {
     'env_probe.py': '7773d3dfd2a9b4d9f77d1f45ad37c6ce2810752dafaebf57780fdd2089ef80b9',
     'target_probe.py': '8e83350d3a8a36f6f61e202758deb6f7a0313e8d0159a069d7cda19352144b0f',
     'build_container_probe.py': 'adc25df0317a8eaef0531a2b343b0a46d2c90773f36f7efa2db39e587008174d',
-    'noexec_container_probe.py': 'e2ff0c1924652dffb1ff323bf7889b9f930f4a50e4a987b9ad1a9fcf3e4053ce',
+    'noexec_container_probe.py': 'ab87c590d11bfe7672cef2105746a6428eac06cc4be2ddb44822a19eeda3a514',
 }
 MODES = ('exec', 'noexec')
 
@@ -31,11 +31,17 @@ class Stop(Exception):
     pass
 
 
+class WorkerFailure(Stop):
+    def __init__(self, diagnostic):
+        super().__init__('WORKER_FAILED_' + diagnostic['stage'].upper())
+        self.diagnostic = diagnostic
+
+
 def load(name):
     path = ROOT / (name + '.py')
     if hashlib.sha256(path.read_bytes()).hexdigest() != HELPERS[path.name]:
         raise Stop('HELPER_CHANGED')
-    spec = importlib.util.spec_from_file_location('r40_' + name, path)
+    spec = importlib.util.spec_from_file_location('r41_' + name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -45,7 +51,7 @@ def payload():
     for name, digest in HELPERS.items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest:
             raise Stop('HELPER_CHANGED')
-    text = 'import types\n_build = types.ModuleType("r40_fixed_r39_build")\n'
+    text = 'import types\n_build = types.ModuleType("r41_fixed_r39_build")\n'
     text += 'exec(' + repr((ROOT / 'build_container_probe.py').read_text()) + ', _build.__dict__)\n'
     return text + (ROOT / 'noexec_container_probe.py').read_text()
 
@@ -62,7 +68,7 @@ def arguments(target, name, run_id, mode):
         '--memory-swap', '512m', '--cpus', '1',
         '--tmpfs', '/tmp:rw,nosuid,nodev,' + mode + ',size=32m,mode=1777',
         '--env', 'PYTHONDONTWRITEBYTECODE=1',
-        '--env', 'RUBY_P1_NOEXEC_PROBE=r40', '--env', 'RUBY_P1_BUILD_PROBE=r39',
+        '--env', 'RUBY_P1_NOEXEC_PROBE=r41', '--env', 'RUBY_P1_BUILD_PROBE=r39',
         '--env', 'RUBY_P1_NOEXEC_MODE=' + mode,
         '--entrypoint', '/usr/bin/python3', '-i', target.CONFIG, '-I', '-B', '-',
     ]
@@ -76,14 +82,70 @@ def number(value, maximum):
     return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= maximum
 
 
+def checked_diagnostic(value):
+    worker = load('noexec_container_probe')
+    enums = {'checkpoint': worker.CHECKPOINTS,
+             'source_kind': ('missing', 'regular', 'symlink', 'directory', 'other'),
+             'exception_type': ('Stop', 'TimeoutExpired', 'OSError', 'Unexpected'),
+             'preflight_reason': worker.PREFLIGHT_REASONS}
+    booleans = ('source_is_file', 'elf64_le', 'x86_64')
+    integers = {'source_size_bytes': (0, 2 ** 63 - 1), 'source_bytes_read': (0, 1024 ** 2 + 1),
+                'returncode': (-255, 255), 'stdout_bytes': (0, 2 ** 31 - 1),
+                'stderr_bytes': (0, 2 ** 31 - 1), 'errno': (1, 4095)}
+    if (type(value) is not dict or 'checkpoint' not in value
+            or set(value) - (set(enums) | set(booleans) | set(integers))):
+        raise Stop('WORKER_DIAGNOSTIC_SCHEMA')
+    for key, item in value.items():
+        if key in enums:
+            valid = type(item) is str and item in enums[key]
+        elif key in booleans:
+            valid = type(item) is bool
+        else:
+            low, high = integers[key]
+            valid = type(item) is int and low <= item <= high
+        if not valid:
+            raise Stop('WORKER_DIAGNOSTIC_SCHEMA')
+    return dict(value)
+
+
+def checked_failure(row, returncode, mode):
+    worker = load('noexec_container_probe')
+    checkpoints = {
+        'identity': ('identity',), 'mount': ('mount', 'snapshot_before'),
+        'preflight': ('preflight', 'snapshot_after'),
+        'kernel_execution': ('source_lstat', 'source_read', 'source_elf', 'fixture_create',
+                             'fixture_write', 'fixture_verify', 'fixture_execute',
+                             'fixture_cleanup', 'workspace_empty', 'mount_table')}
+    if (mode not in MODES or type(row) is not dict or row.get('schema') != worker.SCHEMA
+            or row.get('status') != 'INCOMPLETE' or type(returncode) is not int or returncode != 3
+            or type(row.get('stage')) is not str or row['stage'] not in checkpoints
+            or type(row.get('reason')) is not str or row['reason'] not in worker.REASONS
+            or row.get('scope') != 'fixed_tmp_mount_and_build_preflight_only'
+            or any(row.get(key) is not False for key in ('role_verified', 'full_build_entrypoint_executed',
+                                                       'p1_04_complete', 'phase1_complete'))
+            or not number(row.get('elapsed_seconds'), 60)):
+        raise Stop('WORKER_FAILURE_SCHEMA')
+    if (row['stage'] != 'identity' and row.get('mode') != mode
+            or 'mode' in row and row['mode'] != mode):
+        raise Stop('WORKER_FAILURE_SCHEMA')
+    diagnostic = checked_diagnostic(row.get('diagnostic'))
+    if diagnostic['checkpoint'] not in checkpoints[row['stage']] or 'exception_type' not in diagnostic:
+        raise Stop('WORKER_FAILURE_SCHEMA')
+    # Project only verified fixed fields; never persist raw exception/output text.
+    return {'schema': 'ruby-p1-noexec-failure-r41', 'status': 'INCOMPLETE',
+            'mode': mode, 'stage': row['stage'], 'reason': row['reason'],
+            'worker_exit_code': returncode, 'elapsed_seconds': row['elapsed_seconds'],
+            'diagnostic': diagnostic}
+
+
 def validate(row, mode):
     keys = {'schema', 'status', 'stage', 'scope', 'role_verified',
             'full_build_entrypoint_executed', 'p1_04_complete', 'phase1_complete',
             'mode', 'platform', 'mount', 'preflight', 'guard_state', 'execution',
-            'fixture_directory_empty', 'mount_table_unchanged', 'elapsed_seconds'}
+            'fixture_directory_empty', 'mount_table_unchanged', 'elapsed_seconds', 'diagnostic'}
     noexec = mode == 'noexec'
     if (type(row) is not dict or set(row) != keys
-            or row['schema'] != 'ruby-p1-noexec-container-r40'
+            or row['schema'] != 'ruby-p1-noexec-container-r41'
             or row['status'] != 'NOEXEC_FIXTURE_VERIFIED' or row['stage'] != 'finished'
             or row['scope'] != 'fixed_tmp_mount_and_build_preflight_only' or row['mode'] != mode
             or row['platform'] != {'os': 'centos-stream-9', 'arch': 'x86_64', 'python': '3.9.19'}
@@ -127,9 +189,19 @@ def validate(row, mode):
             or (not noexec and (execution['errno'] is not None
                                 or type(execution['returncode']) is not int or execution['returncode'] != 0))):
         raise Stop('WORKER_EXECUTION')
+    diagnostic = checked_diagnostic(row['diagnostic'])
+    expected = {'checkpoint': 'finished', 'source_kind': 'regular', 'source_is_file': True,
+                'source_size_bytes': execution['binary_bytes'],
+                'source_bytes_read': execution['binary_bytes'], 'elf64_le': True, 'x86_64': True}
+    if noexec:
+        expected.update(errno=13, preflight_reason='WORKSPACE_NOEXEC')
+    else:
+        expected.update(returncode=0, stdout_bytes=0, stderr_bytes=0)
+    if diagnostic != expected:
+        raise Stop('WORKER_DIAGNOSTIC_INCOMPLETE')
 
 
-def run_worker(target, argv, source, deadline):
+def run_worker(target, argv, source, deadline, mode=None):
     timeout = min(60, deadline - time.monotonic())
     if timeout <= 0:
         raise Stop('TIME_LIMIT')
@@ -145,11 +217,7 @@ def run_worker(target, argv, source, deadline):
     except ValueError:
         raise Stop('WORKER_JSON_INVALID') from None
     if process.returncode:
-        # Preserve only an enumerated stage; no exception text, URLs or arbitrary values.
-        stage = row.get('stage') if type(row) is dict else None
-        if stage not in ('identity', 'mount', 'preflight', 'kernel_execution'):
-            stage = 'unknown'
-        raise Stop('WORKER_FAILED_' + stage.upper())
+        raise WorkerFailure(checked_failure(row, process.returncode, mode))
     return row
 
 
@@ -159,7 +227,7 @@ def main(argv=None):
     for name in ('allow-pull', 'ephemeral-ci', 'allow-noexec-fixture'):
         parser.add_argument('--' + name, action='store_true')
     args = parser.parse_args(argv)
-    report = {'schema': 'ruby-p1-noexec-run-r40', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-noexec-run-r41', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'scope': 'two_sequential_offline_disposable_target_containers',
               'role_verified': False, 'p1_04_complete': False, 'phase1_complete': False,
               'results': [], 'cleanup': {}}
@@ -203,9 +271,9 @@ def main(argv=None):
         for mode in MODES:
             report['stage'] = mode
             print('noexec: run ' + mode + ' fixture', flush=True)
-            name = 'ruby-p1-' + run_id + '-noexec-r40-' + mode
+            name = 'ruby-p1-' + run_id + '-noexec-r41-' + mode
             possible.append((name, mode))
-            row = run_worker(target, arguments(target, name, run_id, mode), source, deadline)
+            row = run_worker(target, arguments(target, name, run_id, mode), source, deadline, mode)
             validate(row, mode)
             report['results'].append(row)
             if not target.cleanup(name, run_id):
@@ -214,6 +282,9 @@ def main(argv=None):
         if len({row['execution']['binary_sha256'] for row in report['results']}) != 1:
             raise Stop('CONTROL_BINARY_MISMATCH')
         report.update(status=SUCCESS, stage='finished', same_binary_verified=True)
+    except WorkerFailure as error:
+        report['reason'] = str(error)
+        report['failure_diagnostic'] = error.diagnostic
     except Stop as error:
         report['reason'] = str(error)
     except Exception:

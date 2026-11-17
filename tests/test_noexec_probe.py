@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def module(name):
-    spec = importlib.util.spec_from_file_location('test_r40_' + name, ROOT / 'scripts/p1' / (name + '.py'))
+    spec = importlib.util.spec_from_file_location('test_r41_' + name, ROOT / 'scripts/p1' / (name + '.py'))
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
     return value
@@ -35,6 +35,11 @@ t = module('target_probe')
 def fixture(mode='noexec'):
     noexec = mode == 'noexec'
     state = {'sha256': 'a' * 64, 'entries': 8, 'file_bytes': 100}
+    diagnostic = {'checkpoint': 'finished', 'source_kind': 'regular', 'source_is_file': True,
+                  'source_size_bytes': 4096, 'source_bytes_read': 4096,
+                  'elf64_le': True, 'x86_64': True}
+    diagnostic.update({'errno': 13, 'preflight_reason': 'WORKSPACE_NOEXEC'} if noexec
+                      else {'returncode': 0, 'stdout_bytes': 0, 'stderr_bytes': 0})
     return {'schema': w.SCHEMA, 'status': w.SUCCESS, 'stage': 'finished',
             'scope': 'fixed_tmp_mount_and_build_preflight_only', 'role_verified': False,
             'full_build_entrypoint_executed': False, 'p1_04_complete': False,
@@ -47,7 +52,17 @@ def fixture(mode='noexec'):
             'execution': {'outcome': 'EACCES' if noexec else 'EXECUTED', 'errno': 13 if noexec else None,
                           'returncode': None if noexec else 0, 'stdout_bytes': 0, 'stderr_bytes': 0,
                           'binary_sha256': 'b' * 64, 'binary_bytes': 4096, 'fixture_removed': True},
-            'fixture_directory_empty': True, 'mount_table_unchanged': True, 'elapsed_seconds': 0.5}
+            'fixture_directory_empty': True, 'mount_table_unchanged': True, 'elapsed_seconds': 0.5,
+            'diagnostic': diagnostic}
+
+
+def failure_fixture(reason='EXEC_FIXTURE_SOURCE', checkpoint='source_lstat'):
+    row = {key: value for key, value in fixture('exec').items() if key not in (
+        'execution', 'fixture_directory_empty', 'mount_table_unchanged')}
+    row.update(status='INCOMPLETE', stage='kernel_execution', reason=reason,
+               diagnostic={'checkpoint': checkpoint, 'exception_type': 'Stop',
+                           'source_kind': 'symlink', 'source_size_bytes': 20, 'source_is_file': True})
+    return row
 
 
 class WorkerTests(unittest.TestCase):
@@ -126,8 +141,80 @@ class WorkerTests(unittest.TestCase):
             path = Path(temp) / 'script'; path.write_text('#!/bin/sh\nexit 0\n')
             with self.assertRaisesRegex(w.Stop, 'EXEC_FIXTURE_ELF'): w.elf_bytes(path)
 
+    def test_symlink_rejection_preserves_kind_without_target_or_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'PRIVATE-TARGET'; source.write_bytes(b'PRIVATE-CONTENT')
+            link = Path(temp) / 'true'; link.symlink_to(source)
+            diagnostic = {}
+            with self.assertRaisesRegex(w.Stop, '^EXEC_FIXTURE_SOURCE$'):
+                w.elf_bytes(link, diagnostic)
+            self.assertEqual(diagnostic['source_kind'], 'symlink')
+            self.assertTrue(diagnostic['source_is_file'])
+            self.assertEqual(diagnostic['checkpoint'], 'source_lstat')
+            self.assertNotIn('source_bytes_read', diagnostic)
+            self.assertNotIn('PRIVATE', json.dumps(diagnostic))
+
+    def test_missing_and_invalid_elf_have_distinct_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            p = Path(temp) / 'true'; diagnostic = {}
+            with self.assertRaisesRegex(w.Stop, 'EXEC_FIXTURE_SOURCE'): w.elf_bytes(p, diagnostic)
+            self.assertEqual(diagnostic['source_kind'], 'missing')
+            p.write_bytes(b'bad ELF'); diagnostic = {}
+            with self.assertRaisesRegex(w.Stop, 'EXEC_FIXTURE_ELF'): w.elf_bytes(p, diagnostic)
+            self.assertEqual(diagnostic['source_bytes_read'], 7)
+            self.assertFalse(diagnostic['elf64_le'])
+            self.assertEqual(diagnostic['checkpoint'], 'source_elf')
+
+    def test_unexpected_returncode_and_errno_are_kept_without_raw_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            diagnostic = {}
+            value = SimpleNamespace(returncode=17, stdout=b'PRIVATE-STDOUT', stderr=b'PRIVATE-STDERR')
+            with patch.object(w.subprocess, 'run', return_value=value):
+                with self.assertRaisesRegex(w.Stop, 'EXEC_RESULT_UNEXPECTED'):
+                    w.execute_fixture(temp, b'fixed', False, diagnostic)
+            self.assertEqual(diagnostic['returncode'], 17)
+            self.assertEqual(diagnostic['checkpoint'], 'fixture_execute')
+            self.assertNotIn('PRIVATE', json.dumps(diagnostic))
+            with patch.object(w.subprocess, 'run', side_effect=OSError(errno.ENOEXEC, 'PRIVATE')):
+                with self.assertRaisesRegex(w.Stop, 'EXEC_ERROR_UNEXPECTED'):
+                    w.execute_fixture(temp, b'fixed', False, diagnostic)
+            self.assertEqual(diagnostic['errno'], errno.ENOEXEC)
+            self.assertEqual(list(Path(temp).iterdir()), [])
+
 
 class HostTests(unittest.TestCase):
+    def test_worker_main_failure_json_survives_host_transport(self):
+        # Exercise the worker's real serialization with mocked container prerequisites.
+        # This does not assert that the pinned CI image contains a symlink.
+        with tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
+            source = Path(temp) / 'PRIVATE'; source.write_bytes(b'PRIVATE')
+            link = Path(temp) / 'true'; link.symlink_to(source)
+            read_elf = w.elf_bytes
+            stack.enter_context(patch.object(w, 'identity', return_value='exec'))
+            stack.enter_context(patch.object(w.platform, 'machine', return_value='x86_64'))
+            stack.enter_context(patch.object(w.platform, 'python_version', return_value='3.9.19'))
+            stack.enter_context(patch.object(w.Path, 'read_text', return_value='fixed mount table'))
+            stack.enter_context(patch.object(b, 'mount_for', return_value={
+                'mount_point': '/tmp', 'filesystem': 'tmpfs', 'options': ['rw', 'nosuid', 'nodev']}))
+            stack.enter_context(patch.object(w.os, 'statvfs', return_value=SimpleNamespace(f_flag=0)))
+            stack.enter_context(patch.object(w, 'snapshot', return_value={
+                'sha256': 'a' * 64, 'entries': 8, 'file_bytes': 100}))
+            stack.enter_context(patch.object(w, 'elf_bytes',
+                                            side_effect=lambda diagnostic: read_elf(link, diagnostic)))
+            output = stack.enter_context(patch('sys.stdout', new_callable=io.StringIO))
+            rc = w.main(b)
+            serialized = output.getvalue()
+        self.assertEqual(rc, 3)
+        self.assertNotIn('PRIVATE', serialized)
+        row = json.loads(serialized)
+        self.assertEqual(row['reason'], 'EXEC_FIXTURE_SOURCE')
+        result = SimpleNamespace(returncode=rc, stderr='', stdout=serialized)
+        with patch.object(h.subprocess, 'run', return_value=result):
+            with self.assertRaises(h.WorkerFailure) as raised:
+                h.run_worker(t, [], '', float('inf'), 'exec')
+        self.assertEqual(raised.exception.diagnostic['diagnostic']['source_kind'], 'symlink')
+        self.assertEqual(raised.exception.diagnostic['diagnostic']['checkpoint'], 'source_lstat')
+
     def test_valid_pair_schema(self):
         for mode in h.MODES: h.validate(fixture(mode), mode)
 
@@ -182,8 +269,38 @@ class HostTests(unittest.TestCase):
         result = SimpleNamespace(returncode=3, stderr='', stdout=json.dumps(
             {'status': 'INCOMPLETE', 'stage': 'preflight', 'reason': 'PRIVATE'}))
         with patch.object(h.subprocess, 'run', return_value=result):
-            with self.assertRaisesRegex(h.Stop, '^WORKER_FAILED_PREFLIGHT$'):
-                h.run_worker(t, [], '', float('inf'))
+            with self.assertRaisesRegex(h.Stop, '^WORKER_FAILURE_SCHEMA$'):
+                h.run_worker(t, [], '', float('inf'), 'exec')
+
+    def test_worker_reason_survives_transport_without_raw_fields(self):
+        row = failure_fixture(); row['exception_text'] = 'PRIVATE'; row['stdout'] = 'PRIVATE'
+        result = SimpleNamespace(returncode=3, stderr='', stdout=json.dumps(row))
+        with patch.object(h.subprocess, 'run', return_value=result):
+            with self.assertRaises(h.WorkerFailure) as raised:
+                h.run_worker(t, [], '', float('inf'), 'exec')
+        data = raised.exception.diagnostic
+        self.assertEqual(data['reason'], 'EXEC_FIXTURE_SOURCE')
+        self.assertEqual(data['diagnostic']['source_kind'], 'symlink')
+        self.assertNotIn('PRIVATE', json.dumps(data))
+
+    def test_malformed_failure_is_never_preserved_as_evidence(self):
+        for mutate in (lambda x: x.update(reason='PRIVATE'), lambda x: x.update(status=w.SUCCESS),
+                       lambda x: x.update(stage=[]), lambda x: x.update(reason={}),
+                       lambda x: x.update(schema='ruby-p1-noexec-container-r40'),
+                       lambda x: x.update(mode='noexec'), lambda x: x.update(phase1_complete=True),
+                       lambda x: x.update(elapsed_seconds=float('inf')),
+                       lambda x: x['diagnostic'].update(checkpoint='finished'),
+                       lambda x: x['diagnostic'].update(errno=True),
+                       lambda x: x['diagnostic'].update(source_size_bytes=-1),
+                       lambda x: x['diagnostic'].update(source_bytes_read=1024 ** 2 + 2),
+                       lambda x: x['diagnostic'].update(path='PRIVATE')):
+            row = failure_fixture(); mutate(row)
+            with self.assertRaises(h.Stop): h.checked_failure(row, 3, 'exec')
+
+    def test_diagnostic_failure_does_not_satisfy_success_schema(self):
+        with self.assertRaises(h.Stop): h.validate(failure_fixture(), 'exec')
+        row = fixture('exec'); row['diagnostic']['checkpoint'] = 'source_lstat'
+        with self.assertRaisesRegex(h.Stop, 'WORKER_DIAGNOSTIC_INCOMPLETE'): h.validate(row, 'exec')
 
     def test_no_ci_authorization_means_no_docker_mutation(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True), \
@@ -207,7 +324,8 @@ class HostTests(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, {'CIRCLECI': 'true', 'CIRCLE_BRANCH': h.BRANCH,
                                                         'CIRCLE_SHA1': 'a' * 40}, clear=True))
             stack.enter_context(patch.object(h.os, 'stat', return_value=SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=0)))
-            stack.enter_context(patch.object(h, 'load', side_effect=lambda name: t if name == 'target_probe' else inventory))
+            stack.enter_context(patch.object(h, 'load', side_effect=lambda name:
+                t if name == 'target_probe' else w if name == 'noexec_container_probe' else inventory))
             stack.enter_context(patch.object(t, 'command', return_value=''))
             stack.enter_context(patch.object(t, 'inspect_image', return_value={}))
             clean = stack.enter_context(patch.object(t, 'cleanup', return_value=cleanup))
@@ -240,6 +358,16 @@ class HostTests(unittest.TestCase):
         rc, saved, calls, _ = self.run_host(rows=[fixture('exec'), row])
         self.assertEqual((rc, calls), (3, 2))
         self.assertEqual(saved['reason'], 'CONTROL_BINARY_MISMATCH')
+
+    def test_host_saves_diagnostic_and_stops_before_second_case(self):
+        failure = h.WorkerFailure(h.checked_failure(failure_fixture(), 3, 'exec'))
+        rc, saved, calls, cleanups = self.run_host(rows=[failure])
+        self.assertEqual((rc, calls, cleanups), (3, 1, 1))
+        self.assertEqual(saved['reason'], 'WORKER_FAILED_KERNEL_EXECUTION')
+        self.assertEqual(saved['failure_diagnostic']['reason'], 'EXEC_FIXTURE_SOURCE')
+        self.assertEqual(saved['failure_diagnostic']['diagnostic']['source_kind'], 'symlink')
+        self.assertEqual(saved['results'], [])
+        self.assertTrue(saved['cleanup']['exec'])
 
 
 if __name__ == '__main__':
