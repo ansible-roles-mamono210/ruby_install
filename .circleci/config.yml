@@ -81,7 +81,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Verify exec and noexec boundaries without installing packages
+          name: Verify checksum and redirect guards over live loopback TLS
           no_output_timeout: 8m
           command: |
             set -euo pipefail
@@ -89,8 +89,8 @@ jobs:
             mkdir -p p1-evidence
             set +e
             timeout --signal=TERM --kill-after=30s 7m \
-              python3 scripts/p1/noexec_probe.py \
-              --allow-pull --ephemeral-ci --allow-noexec-fixture \
+              python3 scripts/p1/download_guard_probe.py \
+              --allow-pull --ephemeral-ci --allow-live-tls-fixture \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e

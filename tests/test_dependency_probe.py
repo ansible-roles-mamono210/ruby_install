@@ -1056,8 +1056,8 @@ class HostTests(unittest.TestCase):
         self.assertEqual(job['machine']['image'], 'ubuntu-2204:2023.10.1')
         self.assertEqual(job['resource_class'], 'medium')
         command = job['steps'][1]['run']['command']
-        self.assertIn('scripts/p1/noexec_probe.py', command)
-        self.assertIn('--allow-noexec-fixture', command)
+        self.assertIn('scripts/p1/download_guard_probe.py', command)
+        self.assertIn('--allow-live-tls-fixture', command)
         self.assertNotIn('--allow-rust-install', command)
         self.assertNotIn('--allow-install', command)
         self.assertNotIn('--allow-source-download', command)
