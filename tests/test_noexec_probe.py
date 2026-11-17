@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def module(name):
-    spec = importlib.util.spec_from_file_location('test_r41_' + name, ROOT / 'scripts/p1' / (name + '.py'))
+    spec = importlib.util.spec_from_file_location('test_r43_' + name, ROOT / 'scripts/p1' / (name + '.py'))
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
     return value
@@ -36,7 +36,7 @@ def fixture(mode='noexec'):
     noexec = mode == 'noexec'
     state = {'sha256': 'a' * 64, 'entries': 8, 'file_bytes': 100}
     diagnostic = {'checkpoint': 'finished', 'source_kind': 'regular', 'source_is_file': True,
-                  'source_size_bytes': 4096, 'source_bytes_read': 4096,
+                  'source_size_bytes': w.FIXTURE_BYTES, 'source_bytes_read': w.FIXTURE_BYTES,
                   'elf64_le': True, 'x86_64': True}
     diagnostic.update({'errno': 13, 'preflight_reason': 'WORKSPACE_NOEXEC'} if noexec
                       else {'returncode': 0, 'stdout_bytes': 0, 'stderr_bytes': 0})
@@ -51,7 +51,7 @@ def fixture(mode='noexec'):
             'guard_state': {'before': state, 'after': copy.deepcopy(state), 'unchanged': True},
             'execution': {'outcome': 'EACCES' if noexec else 'EXECUTED', 'errno': 13 if noexec else None,
                           'returncode': None if noexec else 0, 'stdout_bytes': 0, 'stderr_bytes': 0,
-                          'binary_sha256': 'b' * 64, 'binary_bytes': 4096, 'fixture_removed': True},
+                          'binary_sha256': w.FIXTURE_SHA256, 'binary_bytes': w.FIXTURE_BYTES, 'fixture_removed': True},
             'fixture_directory_empty': True, 'mount_table_unchanged': True, 'elapsed_seconds': 0.5,
             'diagnostic': diagnostic}
 
@@ -114,7 +114,7 @@ class WorkerTests(unittest.TestCase):
     def test_native_binary_executes_and_is_removed_on_local_exec_mount(self):
         with tempfile.TemporaryDirectory() as temp:
             self.assertFalse(os.statvfs(temp).f_flag & os.ST_NOEXEC)
-            result = w.execute_fixture(temp, w.elf_bytes(), False)
+            result = w.execute_fixture(temp, w.elf_bytes(Path('/usr/bin/true')), False)
             self.assertEqual(result['outcome'], 'EXECUTED')
             self.assertEqual(list(Path(temp).iterdir()), [])
 
@@ -140,6 +140,46 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'script'; path.write_text('#!/bin/sh\nexit 0\n')
             with self.assertRaisesRegex(w.Stop, 'EXEC_FIXTURE_ELF'): w.elf_bytes(path)
+
+    def test_actual_image_true_wrapper_is_rejected_before_execution(self):
+        # Exact 51 bytes observed in the pinned image; this is not an ELF fixture.
+        wrapper = b'#!/usr/bin/coreutils --coreutils-prog-shebang=true\n'
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'true'; source.write_bytes(wrapper)
+            diagnostic = {}
+            with patch.object(w, 'FIXTURE_PATH', source), patch.object(w.subprocess, 'run') as run:
+                with self.assertRaisesRegex(w.Stop, '^EXEC_FIXTURE_ELF$'):
+                    w.fixture_bytes(diagnostic)
+                run.assert_not_called()
+            self.assertEqual(diagnostic['source_bytes_read'], 51)
+            self.assertEqual(diagnostic['checkpoint'], 'source_elf')
+
+    def test_synthetic_elf_at_measured_coreutils_size_passes_bounded_read(self):
+        # Only the format/size reader is tested here; actual image bytes are checked separately.
+        data = b'\x7fELF\x02\x01' + b'\0' * 12 + b'\x3e\x00' + b'\0' * (1347176 - 20)
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'coreutils'; source.write_bytes(data)
+            self.assertGreater(len(data), 1024 ** 2)
+            self.assertEqual(w.elf_bytes(source), data)
+
+    def test_fixture_rejects_changed_hash_and_size_even_for_valid_elf(self):
+        data = b'\x7fELF\x02\x01' + b'\0' * 12 + b'\x3e\x00' + b'\0' * (1347176 - 20)
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'coreutils'
+            for candidate in (data, data[:-1]):
+                source.write_bytes(candidate); diagnostic = {}
+                with patch.object(w, 'FIXTURE_PATH', source):
+                    with self.assertRaisesRegex(w.Stop, '^EXEC_FIXTURE_IDENTITY$'):
+                        w.fixture_bytes(diagnostic)
+                self.assertEqual(diagnostic['checkpoint'], 'source_identity')
+
+    def test_oversize_elf_is_read_only_to_the_finite_limit(self):
+        data = b'\x7fELF\x02\x01' + b'\0' * 12 + b'\x3e\x00' + b'\0' * (3 * 1024 ** 2)
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'coreutils'; source.write_bytes(data); diagnostic = {}
+            with self.assertRaisesRegex(w.Stop, '^EXEC_FIXTURE_ELF$'):
+                w.elf_bytes(source, diagnostic)
+            self.assertEqual(diagnostic['source_bytes_read'], 2 * 1024 ** 2 + 1)
 
     def test_symlink_rejection_preserves_kind_without_target_or_content(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -199,7 +239,7 @@ class HostTests(unittest.TestCase):
             stack.enter_context(patch.object(w.os, 'statvfs', return_value=SimpleNamespace(f_flag=0)))
             stack.enter_context(patch.object(w, 'snapshot', return_value={
                 'sha256': 'a' * 64, 'entries': 8, 'file_bytes': 100}))
-            stack.enter_context(patch.object(w, 'elf_bytes',
+            stack.enter_context(patch.object(w, 'fixture_bytes',
                                             side_effect=lambda diagnostic: read_elf(link, diagnostic)))
             output = stack.enter_context(patch('sys.stdout', new_callable=io.StringIO))
             rc = w.main(b)
@@ -217,6 +257,23 @@ class HostTests(unittest.TestCase):
 
     def test_valid_pair_schema(self):
         for mode in h.MODES: h.validate(fixture(mode), mode)
+
+    def test_same_unapproved_binary_in_both_cases_fails_before_noexec(self):
+        rows = [fixture(mode) for mode in h.MODES]
+        for row in rows: row['execution']['binary_sha256'] = 'c' * 64
+        rc, saved, calls, _ = self.run_host(rows=rows)
+        self.assertEqual((rc, calls), (3, 1))
+        self.assertEqual(saved['reason'], 'WORKER_EXECUTION')
+
+    def test_pinned_binary_size_and_identity_failure_transport(self):
+        row = fixture('exec')
+        row['execution']['binary_bytes'] -= 1
+        with self.assertRaisesRegex(h.Stop, '^WORKER_EXECUTION$'):
+            h.validate(row, 'exec')
+        row = failure_fixture('EXEC_FIXTURE_IDENTITY', 'source_identity')
+        result = h.checked_failure(row, 3, 'exec')
+        self.assertEqual(result['reason'], 'EXEC_FIXTURE_IDENTITY')
+        self.assertEqual(result['diagnostic']['checkpoint'], 'source_identity')
 
     def test_missing_extra_or_incomplete_records_fail(self):
         for mutate in (lambda x: x.pop('execution'), lambda x: x.update(extra='PRIVATE'),
@@ -292,7 +349,7 @@ class HostTests(unittest.TestCase):
                        lambda x: x['diagnostic'].update(checkpoint='finished'),
                        lambda x: x['diagnostic'].update(errno=True),
                        lambda x: x['diagnostic'].update(source_size_bytes=-1),
-                       lambda x: x['diagnostic'].update(source_bytes_read=1024 ** 2 + 2),
+                       lambda x: x['diagnostic'].update(source_bytes_read=w.MAX_FIXTURE_BYTES + 2),
                        lambda x: x['diagnostic'].update(path='PRIVATE')):
             row = failure_fixture(); mutate(row)
             with self.assertRaises(h.Stop): h.checked_failure(row, 3, 'exec')
@@ -357,7 +414,7 @@ class HostTests(unittest.TestCase):
         row = fixture(); row['execution']['binary_sha256'] = 'c' * 64
         rc, saved, calls, _ = self.run_host(rows=[fixture('exec'), row])
         self.assertEqual((rc, calls), (3, 2))
-        self.assertEqual(saved['reason'], 'CONTROL_BINARY_MISMATCH')
+        self.assertEqual(saved['reason'], 'WORKER_EXECUTION')
 
     def test_host_saves_diagnostic_and_stops_before_second_case(self):
         failure = h.WorkerFailure(h.checked_failure(failure_fixture(), 3, 'exec'))

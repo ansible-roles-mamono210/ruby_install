@@ -22,7 +22,7 @@ HELPERS = {
     'env_probe.py': '7773d3dfd2a9b4d9f77d1f45ad37c6ce2810752dafaebf57780fdd2089ef80b9',
     'target_probe.py': '8e83350d3a8a36f6f61e202758deb6f7a0313e8d0159a069d7cda19352144b0f',
     'build_container_probe.py': 'adc25df0317a8eaef0531a2b343b0a46d2c90773f36f7efa2db39e587008174d',
-    'noexec_container_probe.py': 'ab87c590d11bfe7672cef2105746a6428eac06cc4be2ddb44822a19eeda3a514',
+    'noexec_container_probe.py': '3ca158d689ac7e9924aa41040d99aad54c9d10557e397a2814f71021c4da6da8',
 }
 MODES = ('exec', 'noexec')
 
@@ -41,7 +41,7 @@ def load(name):
     path = ROOT / (name + '.py')
     if hashlib.sha256(path.read_bytes()).hexdigest() != HELPERS[path.name]:
         raise Stop('HELPER_CHANGED')
-    spec = importlib.util.spec_from_file_location('r41_' + name, path)
+    spec = importlib.util.spec_from_file_location('r43_' + name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -51,7 +51,7 @@ def payload():
     for name, digest in HELPERS.items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest:
             raise Stop('HELPER_CHANGED')
-    text = 'import types\n_build = types.ModuleType("r41_fixed_r39_build")\n'
+    text = 'import types\n_build = types.ModuleType("r43_fixed_r39_build")\n'
     text += 'exec(' + repr((ROOT / 'build_container_probe.py').read_text()) + ', _build.__dict__)\n'
     return text + (ROOT / 'noexec_container_probe.py').read_text()
 
@@ -68,7 +68,7 @@ def arguments(target, name, run_id, mode):
         '--memory-swap', '512m', '--cpus', '1',
         '--tmpfs', '/tmp:rw,nosuid,nodev,' + mode + ',size=32m,mode=1777',
         '--env', 'PYTHONDONTWRITEBYTECODE=1',
-        '--env', 'RUBY_P1_NOEXEC_PROBE=r41', '--env', 'RUBY_P1_BUILD_PROBE=r39',
+        '--env', 'RUBY_P1_NOEXEC_PROBE=r43', '--env', 'RUBY_P1_BUILD_PROBE=r39',
         '--env', 'RUBY_P1_NOEXEC_MODE=' + mode,
         '--entrypoint', '/usr/bin/python3', '-i', target.CONFIG, '-I', '-B', '-',
     ]
@@ -89,7 +89,7 @@ def checked_diagnostic(value):
              'exception_type': ('Stop', 'TimeoutExpired', 'OSError', 'Unexpected'),
              'preflight_reason': worker.PREFLIGHT_REASONS}
     booleans = ('source_is_file', 'elf64_le', 'x86_64')
-    integers = {'source_size_bytes': (0, 2 ** 63 - 1), 'source_bytes_read': (0, 1024 ** 2 + 1),
+    integers = {'source_size_bytes': (0, 2 ** 63 - 1), 'source_bytes_read': (0, worker.MAX_FIXTURE_BYTES + 1),
                 'returncode': (-255, 255), 'stdout_bytes': (0, 2 ** 31 - 1),
                 'stderr_bytes': (0, 2 ** 31 - 1), 'errno': (1, 4095)}
     if (type(value) is not dict or 'checkpoint' not in value
@@ -113,7 +113,7 @@ def checked_failure(row, returncode, mode):
     checkpoints = {
         'identity': ('identity',), 'mount': ('mount', 'snapshot_before'),
         'preflight': ('preflight', 'snapshot_after'),
-        'kernel_execution': ('source_lstat', 'source_read', 'source_elf', 'fixture_create',
+        'kernel_execution': ('source_lstat', 'source_read', 'source_elf', 'source_identity', 'fixture_create',
                              'fixture_write', 'fixture_verify', 'fixture_execute',
                              'fixture_cleanup', 'workspace_empty', 'mount_table')}
     if (mode not in MODES or type(row) is not dict or row.get('schema') != worker.SCHEMA
@@ -132,20 +132,21 @@ def checked_failure(row, returncode, mode):
     if diagnostic['checkpoint'] not in checkpoints[row['stage']] or 'exception_type' not in diagnostic:
         raise Stop('WORKER_FAILURE_SCHEMA')
     # Project only verified fixed fields; never persist raw exception/output text.
-    return {'schema': 'ruby-p1-noexec-failure-r41', 'status': 'INCOMPLETE',
+    return {'schema': 'ruby-p1-noexec-failure-r43', 'status': 'INCOMPLETE',
             'mode': mode, 'stage': row['stage'], 'reason': row['reason'],
             'worker_exit_code': returncode, 'elapsed_seconds': row['elapsed_seconds'],
             'diagnostic': diagnostic}
 
 
 def validate(row, mode):
+    worker = load('noexec_container_probe')
     keys = {'schema', 'status', 'stage', 'scope', 'role_verified',
             'full_build_entrypoint_executed', 'p1_04_complete', 'phase1_complete',
             'mode', 'platform', 'mount', 'preflight', 'guard_state', 'execution',
             'fixture_directory_empty', 'mount_table_unchanged', 'elapsed_seconds', 'diagnostic'}
     noexec = mode == 'noexec'
     if (type(row) is not dict or set(row) != keys
-            or row['schema'] != 'ruby-p1-noexec-container-r41'
+            or row['schema'] != worker.SCHEMA
             or row['status'] != 'NOEXEC_FIXTURE_VERIFIED' or row['stage'] != 'finished'
             or row['scope'] != 'fixed_tmp_mount_and_build_preflight_only' or row['mode'] != mode
             or row['platform'] != {'os': 'centos-stream-9', 'arch': 'x86_64', 'python': '3.9.19'}
@@ -180,8 +181,8 @@ def validate(row, mode):
     if (type(execution) is not dict or set(execution) != {'outcome', 'errno', 'returncode',
             'stdout_bytes', 'stderr_bytes', 'binary_sha256', 'binary_bytes', 'fixture_removed'}
             or execution['outcome'] != ('EACCES' if noexec else 'EXECUTED')
-            or execution['fixture_removed'] is not True or not digest(execution['binary_sha256'])
-            or type(execution['binary_bytes']) is not int or not 64 <= execution['binary_bytes'] <= 1024 ** 2
+            or execution['fixture_removed'] is not True or execution['binary_sha256'] != worker.FIXTURE_SHA256
+            or type(execution['binary_bytes']) is not int or execution['binary_bytes'] != worker.FIXTURE_BYTES
             or any(type(execution[key]) is not int or execution[key] != 0
                    for key in ('stdout_bytes', 'stderr_bytes'))
             or (noexec and (type(execution['errno']) is not int or execution['errno'] != 13
@@ -227,7 +228,7 @@ def main(argv=None):
     for name in ('allow-pull', 'ephemeral-ci', 'allow-noexec-fixture'):
         parser.add_argument('--' + name, action='store_true')
     args = parser.parse_args(argv)
-    report = {'schema': 'ruby-p1-noexec-run-r41', 'status': 'INCOMPLETE', 'stage': 'preflight',
+    report = {'schema': 'ruby-p1-noexec-run-r43', 'status': 'INCOMPLETE', 'stage': 'preflight',
               'scope': 'two_sequential_offline_disposable_target_containers',
               'role_verified': False, 'p1_04_complete': False, 'phase1_complete': False,
               'results': [], 'cleanup': {}}
@@ -271,7 +272,7 @@ def main(argv=None):
         for mode in MODES:
             report['stage'] = mode
             print('noexec: run ' + mode + ' fixture', flush=True)
-            name = 'ruby-p1-' + run_id + '-noexec-r41-' + mode
+            name = 'ruby-p1-' + run_id + '-noexec-r43-' + mode
             possible.append((name, mode))
             row = run_worker(target, arguments(target, name, run_id, mode), source, deadline, mode)
             validate(row, mode)

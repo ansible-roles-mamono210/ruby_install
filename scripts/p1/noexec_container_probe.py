@@ -11,14 +11,18 @@ import subprocess
 import tempfile
 import time
 
-SCHEMA = 'ruby-p1-noexec-container-r41'
+SCHEMA = 'ruby-p1-noexec-container-r43'
 SUCCESS = 'NOEXEC_FIXTURE_VERIFIED'
+FIXTURE_PATH = Path('/usr/bin/coreutils')
+FIXTURE_BYTES = 1347176
+FIXTURE_SHA256 = '88ee0f88cddd02c13d3f1de374119ccc23468ffa9e65433b3e9d390142c2cc0d'
+MAX_FIXTURE_BYTES = 2 * 1024 ** 2
 CHECKPOINTS = ('identity', 'mount', 'snapshot_before', 'preflight', 'snapshot_after',
-               'source_lstat', 'source_read', 'source_elf', 'fixture_create',
+               'source_lstat', 'source_read', 'source_elf', 'source_identity', 'fixture_create',
                'fixture_write', 'fixture_verify', 'fixture_execute', 'fixture_cleanup',
                'workspace_empty', 'mount_table', 'finished')
 REASONS = ('STATE_ENTRY_LIMIT', 'STATE_BYTE_LIMIT', 'STATE_FILE_TYPE',
-           'EXEC_FIXTURE_SOURCE', 'EXEC_FIXTURE_ELF', 'EXEC_FIXTURE_CHANGED',
+           'EXEC_FIXTURE_SOURCE', 'EXEC_FIXTURE_ELF', 'EXEC_FIXTURE_IDENTITY', 'EXEC_FIXTURE_CHANGED',
            'EXEC_ERROR_UNEXPECTED', 'EXEC_RESULT_UNEXPECTED', 'EXEC_FIXTURE_CLEANUP',
            'PREFLIGHT_OTHER_REASON', 'PREFLIGHT_DID_NOT_REJECT', 'IDENTITY',
            'SECURITY_BOUNDARY', 'ROOT_NOT_READ_ONLY', 'FIXTURE_INITIAL_STATE',
@@ -81,7 +85,7 @@ def snapshot(paths=STATE_PATHS):
     return {'sha256': digest.hexdigest(), 'entries': count, 'file_bytes': total}
 
 
-def elf_bytes(path=Path('/usr/bin/true'), diagnostic=None):
+def elf_bytes(path, diagnostic=None):
     diagnostic = {} if diagnostic is None else diagnostic
     diagnostic['checkpoint'] = 'source_lstat'
     try:
@@ -97,19 +101,31 @@ def elf_bytes(path=Path('/usr/bin/true'), diagnostic=None):
     need(diagnostic['source_is_file'] and not path.is_symlink(), 'EXEC_FIXTURE_SOURCE')
     diagnostic['checkpoint'] = 'source_read'
     with path.open('rb') as handle:
-        data = handle.read(1024 * 1024 + 1)
+        data = handle.read(MAX_FIXTURE_BYTES + 1)
     diagnostic.update(checkpoint='source_elf', source_bytes_read=len(data),
                       elf64_le=data[:6] == b'\x7fELF\x02\x01', x86_64=data[18:20] == b'\x3e\x00')
     # ELF64, little endian, x86-64. Use the image's binary, not a script/interpreter.
-    need(64 <= len(data) <= 1024 * 1024 and data[:6] == b'\x7fELF\x02\x01'
+    need(64 <= len(data) <= MAX_FIXTURE_BYTES and data[:6] == b'\x7fELF\x02\x01'
          and data[18:20] == b'\x3e\x00', 'EXEC_FIXTURE_ELF')
+    return data
+
+
+def fixture_bytes(diagnostic=None):
+    """Pin the image's coreutils ELF; its /usr/bin/true is a shebang wrapper."""
+    diagnostic = {} if diagnostic is None else diagnostic
+    data = elf_bytes(FIXTURE_PATH, diagnostic)
+    diagnostic['checkpoint'] = 'source_identity'
+    need(len(data) == FIXTURE_BYTES and diagnostic['source_size_bytes'] == FIXTURE_BYTES
+         and hashlib.sha256(data).hexdigest() == FIXTURE_SHA256, 'EXEC_FIXTURE_IDENTITY')
     return data
 
 
 def execute_fixture(parent, data, expect_noexec, diagnostic=None):
     diagnostic = {} if diagnostic is None else diagnostic
     diagnostic['checkpoint'] = 'fixture_create'
-    with tempfile.TemporaryDirectory(prefix='ruby-p1-noexec-r41-', dir=parent) as directory:
+    with tempfile.TemporaryDirectory(prefix='ruby-p1-noexec-r43-', dir=parent) as directory:
+        # GNU single-binary coreutils dispatches the true applet by argv[0].
+        # Execute the copied ELF directly so the kernel checks the target mount.
         target = Path(directory) / 'true'
         diagnostic['checkpoint'] = 'fixture_write'
         with target.open('xb') as handle:
@@ -158,7 +174,7 @@ def check_preflight(build, expect_noexec, diagnostic=None):
 
 def identity():
     mode = os.environ.get('RUBY_P1_NOEXEC_MODE')
-    need(os.environ.get('RUBY_P1_NOEXEC_PROBE') == 'r41'
+    need(os.environ.get('RUBY_P1_NOEXEC_PROBE') == 'r43'
          and os.environ.get('RUBY_P1_BUILD_PROBE') == 'r39'
          and mode in ('exec', 'noexec') and os.getuid() == 0
          and platform.system() == 'Linux' and platform.machine() == 'x86_64'
@@ -229,7 +245,7 @@ def main(build):
         need(before == after, 'PREFLIGHT_STATE_CHANGED')
         # The controlled executable is created only after guard-state comparison.
         report['stage'] = 'kernel_execution'
-        data = elf_bytes(diagnostic=diagnostic)
+        data = fixture_bytes(diagnostic=diagnostic)
         report['execution'] = execute_fixture('/tmp', data, noexec, diagnostic)
         diagnostic['checkpoint'] = 'workspace_empty'
         need(not list(Path('/tmp').iterdir()), 'WORKSPACE_NOT_EMPTY')
