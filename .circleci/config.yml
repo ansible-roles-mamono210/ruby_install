@@ -55,7 +55,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Diagnose phase memory for Ruby 4.0.9 with docs and Rust present
+          name: Diagnose phase memory for Ruby 3.4.12 with docs and Rust present
           no_output_timeout: 16m
           command: |
             set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
             timeout --signal=TERM --kill-after=60s 15m \
               python3 scripts/p1/build_probe.py \
               --allow-pull --ephemeral-ci --allow-install --allow-rust-install --allow-ci430-replacements \
-              --allow-ruby-409-rust-build --allow-memory-diagnostic --output p1-evidence/environment.json
+              --allow-ruby-3412-rust-build --allow-memory-diagnostic --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
             printf '%s\n' "$p1_probe_rc" > p1-evidence/exit-code.txt
