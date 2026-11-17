@@ -14,7 +14,11 @@ future Ruby installation Role on CentOS Stream 9.
 
 ## v0.1.0 development snapshot
 
-**Preparation status: not published; final candidate SHA and fixed-image CI pending.**
+**Specification/evaluation snapshot: the new Role contract is unimplemented.**
+CI462 passed on `2b4f9a397f3ad9e23001eee6ddcc260533aa0ad9`. See the
+[release notes](docs/releases/v0.1.0.md) for its exact scope. The published
+GitHub Pre-release identifies the approved release SHA and its verification
+record; the presence of these files alone does not establish publication.
 v0.1.0 fixes the Phase 1 specification, evaluation tooling and historical
 evidence. The included legacy Role does not implement the new contract.
 The first planned installation-capable version under that contract is v0.2.0.
@@ -593,9 +597,9 @@ and a finalized LICENSE before the first v0.1.0 publication, including a tag-onl
 publication. The holder confirmed the existing code was self-written; this
 candidate includes the BSD-3-Clause LICENSE with the confirmed holder and year.
 This completes the candidate's license preparation, not its release validation.
-The v0.1.0 check configuration is described in the release notes. Its fixed
-images, real execution results, budget and final candidate remain to be verified
-before publication; local preparation is not completion of those conditions.
+The v0.1.0 check configuration and CI462 evidence are described in the release
+notes. A final candidate must have its own verification record before publication;
+CI462 is evidence for its recorded SHA, not for every later documentation commit.
 None of the evaluation evidence alone establishes release readiness.
 
 ## Earlier implementation snapshot

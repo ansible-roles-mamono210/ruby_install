@@ -15,8 +15,10 @@ The runtime host mock also follows `tempfile.gettempdir()` so a dedicated CI
 `TMPDIR` works with the same assertions;
 Phase 1 evaluation scripts and all other tests remain unchanged. This preserves
 the original build/acquisition measurements at their original source commits.
-The candidate's regression checks still require verification in the fixed CI
-environments.
+CI462 verified the regression checks on
+`2b4f9a397f3ad9e23001eee6ddcc260533aa0ad9` in the fixed CI environments.
+Later candidates require their own verification record; the CI462 result is
+not reassigned to another SHA.
 That does not claim all old probe
 revisions are byte-identical to the latest scripts.
 
@@ -91,14 +93,15 @@ names actually present in defaults and accepted the renamed control. Its eight
 cases and cleanup are referenced from the saved execution record; its original
 artifact has not been revalidated for this ledger. This is not whole-Role lint.
 
-The proposed candidate uses the same selected controller/lint digests listed
-in [the release notes](releases/v0.1.0.md). Historical evaluation environments,
-including dependencies/CRB/PATH, do not establish legacy Role compatibility or
-the future module's target-Python coverage. The controller/lint candidate jobs
-still need actual fixed-image execution and final candidate retrieval.
+CI462 used the selected controller/lint digests listed in
+[the release notes](releases/v0.1.0.md). It passed the regression checks and
+independent 78-file retrieval for its recorded SHA. Historical evaluation
+environments, including dependencies/CRB/PATH, do not establish legacy Role
+compatibility or the future module's target-Python coverage.
 
-The repository contains 21 regression files with 582 statically counted methods.
-Candidate execution must record actual collection, results and skips, and require
-the six real lint methods on the lint job. Those tests are separate from the
+The repository contains 21 regression files. CI462 collected 582 methods on the
+controller: 576 passed and six dedicated lint methods were skipped. The lint job
+passed all 20 methods, including those same six IDs, with no skips. The union
+therefore covers 582 distinct successful methods. Those tests are separate from the
 16 CI454 acquisition cases and from the Ruby build conditions. The ledger does
 not sum them into one acceptance count.

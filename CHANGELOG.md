@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 — in preparation, not published
+## v0.1.0 — specification and evaluation snapshot
 
 ### Included
 
@@ -20,15 +20,19 @@ unchanged. They do not implement the new Role contract. Evaluation results are
 not proof of Role installation, healthy reruns, record creation or link safety.
 The main-branch badge is not a v0.1.0 candidate result.
 
-Three existing workflow-condition tests are updated to require the new exclusion
-and exercise all parameter combinations; evaluation scripts and other tests are
+Three existing test files cover the new workflow exclusion and all parameter
+combinations. The runtime host mock follows the configured temporary directory
+instead of assuming `/tmp` directly. Evaluation scripts and other tests are
 unchanged. No prior build result is reassigned to a new source commit.
 
 The BSD-3-Clause LICENSE and matching metadata are included. The holder confirmed
 the existing code was self-written and selected `mamono210`, with 2021 from the
 repository's initial commit, for the copyright notice. This replaces the earlier
-ambiguous license labels. Candidate SHA, fixed-image CI results, tag retrieval
-and GitHub Pre-release publication are pending.
+ambiguous license labels. CI462 passed on
+`2b4f9a397f3ad9e23001eee6ddcc260533aa0ad9`; the exact checks and limits are
+recorded in [the release notes](docs/releases/v0.1.0.md). The published
+Pre-release identifies the final approved SHA and its verification record.
+These notes do not by themselves assert that a tag or Release exists.
 
 ### Following releases
 
