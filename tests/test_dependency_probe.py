@@ -1056,12 +1056,13 @@ class HostTests(unittest.TestCase):
         self.assertEqual(job['machine']['image'], 'ubuntu-2204:2023.10.1')
         self.assertEqual(job['resource_class'], 'medium')
         command = job['steps'][1]['run']['command']
-        self.assertIn('scripts/p1/rust_install_probe.py', command)
-        self.assertIn('--allow-rust-install --allow-ci430-replacements', command)
+        self.assertIn('scripts/p1/noexec_probe.py', command)
+        self.assertIn('--allow-noexec-fixture', command)
+        self.assertNotIn('--allow-rust-install', command)
         self.assertNotIn('--allow-install', command)
         self.assertNotIn('--allow-source-download', command)
-        self.assertIn('30s 21m', command)
-        self.assertEqual(job['steps'][1]['run']['no_output_timeout'], '22m')
+        self.assertIn('30s 7m', command)
+        self.assertEqual(job['steps'][1]['run']['no_output_timeout'], '8m')
 
 
 if __name__ == '__main__':

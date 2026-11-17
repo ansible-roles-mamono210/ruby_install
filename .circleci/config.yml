@@ -81,16 +81,16 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install the CI430 Rust dependency plan and check the compiler
-          no_output_timeout: 22m
+          name: Verify exec and noexec boundaries without installing packages
+          no_output_timeout: 8m
           command: |
             set -euo pipefail
             umask 077
             mkdir -p p1-evidence
             set +e
-            timeout --signal=TERM --kill-after=30s 21m \
-              python3 scripts/p1/rust_install_probe.py \
-              --allow-pull --ephemeral-ci --allow-rust-install --allow-ci430-replacements \
+            timeout --signal=TERM --kill-after=30s 7m \
+              python3 scripts/p1/noexec_probe.py \
+              --allow-pull --ephemeral-ci --allow-noexec-fixture \
               --output p1-evidence/environment.json
             p1_probe_rc=$?
             set -e
