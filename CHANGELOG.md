@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — v0.2.0 development
+
+- Replace the four legacy defaults with ten public inputs. Reject the five
+  documented legacy names when visible, including null values.
+- Check native types, positive build parallelism and the selected command
+  list. Stop link requests and all installation attempts before host inspection
+  while the remaining preflight stages are under development.
+
 ## v0.1.0 — specification and evaluation snapshot
 
 ### Included

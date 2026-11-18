@@ -1,0 +1,19 @@
+---
+- name: Check controller-only preflight outcomes
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Exercise the normal Role entry
+      block:
+        - name: Run ruby_install
+          ansible.builtin.include_role:
+            name: ruby_install
+        - name: Detect unexpected success
+          ansible.builtin.fail:
+            msg: Unexpected Role success
+      rescue:
+        - name: Verify the expected stop and absence of a change
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg.startswith(expected_reason)
+              - not (ansible_failed_result.changed | default(false))

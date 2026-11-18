@@ -1,0 +1,65 @@
+---
+- name: Reject legacy workspace
+  ansible.builtin.fail:
+    msg: "LEGACY_INPUT: workspace. Use ruby_install_workspace."
+  when: "'workspace' in query('ansible.builtin.varnames', '^workspace$')"
+
+- name: Reject legacy ruby_version
+  ansible.builtin.fail:
+    msg: "LEGACY_INPUT: ruby_version. Use ruby_install_version."
+  when: "'ruby_version' in query('ansible.builtin.varnames', '^ruby_version$')"
+
+- name: Reject legacy ruby_download_url
+  ansible.builtin.fail:
+    msg: "LEGACY_INPUT: ruby_download_url. Use ruby_install_download_url."
+  when: "'ruby_download_url' in query('ansible.builtin.varnames', '^ruby_download_url$')"
+
+- name: Reject legacy ruby_make_prefix
+  ansible.builtin.fail:
+    msg: "LEGACY_INPUT: ruby_make_prefix. Choose a dedicated directory with ruby_install_prefix."
+  when: "'ruby_make_prefix' in query('ansible.builtin.varnames', '^ruby_make_prefix$')"
+
+- name: Reject legacy ruby_source_configure_command
+  ansible.builtin.fail:
+    msg: "LEGACY_INPUT: ruby_source_configure_command. Remove the arbitrary configure command."
+  when: "'ruby_source_configure_command' in query('ansible.builtin.varnames', '^ruby_source_configure_command$')"
+
+- name: Require native strings for version, paths and download inputs
+  ansible.builtin.assert:
+    that:
+      - ruby_install_version is string
+      - ruby_install_prefix is string
+      - ruby_install_workspace is string
+      - ruby_install_download_url is string
+      - ruby_install_download_checksum is string
+    fail_msg: "INVALID_INPUT: version, prefix, workspace, download URL and checksum must be strings."
+
+- name: Require native booleans for switches
+  ansible.builtin.assert:
+    that:
+      - ruby_install_documentation is boolean
+      - ruby_install_create_symlinks is boolean
+      - ruby_install_keep_build_workspace is boolean
+    fail_msg: "INVALID_INPUT: documentation, create_symlinks and keep_build_workspace must be booleans."
+
+- name: Require a positive integer for build parallelism
+  ansible.builtin.assert:
+    that:
+      - ruby_install_build_jobs is integer
+      - ruby_install_build_jobs >= 1
+    fail_msg: "INVALID_INPUT: ruby_install_build_jobs must be a positive integer."
+
+- name: Validate command selection before checking link availability
+  ansible.builtin.assert:
+    that:
+      - (ruby_install_symlink_commands | type_debug) == 'list'
+      - (ruby_install_symlink_commands | reject('string') | list | length) == 0
+      - (ruby_install_symlink_commands | difference(['ruby', 'gem', 'bundle', 'bundler', 'irb', 'erb', 'rdoc', 'ri', 'rake']) | length) == 0
+      - (ruby_install_symlink_commands | unique(case_sensitive=true) | length) == (ruby_install_symlink_commands | length)
+      - not ruby_install_create_symlinks or (ruby_install_symlink_commands | length) > 0
+    fail_msg: "INVALID_INPUT: ruby_install_symlink_commands requires distinct supported command names and must be nonempty when enabled."
+
+- name: Stop unsupported link publication requests
+  ansible.builtin.fail:
+    msg: "LINKS_UNAVAILABLE: publication is planned for v0.3.0."
+  when: ruby_install_create_symlinks

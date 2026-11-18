@@ -1,5 +1,20 @@
 ---
-workspace: /tmp
-ruby_download_url: http://cache.ruby-lang.org/pub/ruby/3.2/ruby-3.2.3.tar.gz
-ruby_version: 3.2.3
-ruby_make_prefix: /usr/local/bin/ruby
+ruby_install_version: "3.4.12"
+ruby_install_prefix: /opt/ruby
+ruby_install_download_url: ""
+ruby_install_download_checksum: ""
+ruby_install_documentation: true
+ruby_install_create_symlinks: false
+ruby_install_symlink_commands:
+  - ruby
+  - gem
+  - bundle
+  - bundler
+  - irb
+  - erb
+  - rdoc
+  - ri
+  - rake
+ruby_install_build_jobs: 1
+ruby_install_workspace: /tmp
+ruby_install_keep_build_workspace: false

@@ -5,12 +5,12 @@
 A development snapshot of specifications and evaluation tooling for a
 future Ruby installation Role on CentOS Stream 9.
 
-> **Development status:** the v1.0.0 contract below describes the implementation
-> target. The current Role in `tasks/main.yml` and `defaults/main.yml` still uses
-> the earlier interface and does not implement this contract. Evaluation scripts
-> under `scripts/p1/` are separate from the Role. Their passing results do not
-> establish Role installation, idempotence, or release readiness. The badge above
-> reports the `main` branch, not completion of the v1.0.0 contract.
+**v0.2.0 development branch.** The Role now checks the public input types,
+selected command names and legacy variable names on the controller. A valid
+link request stops with `LINKS_UNAVAILABLE`. Other accepted inputs reach
+`PREFLIGHT_INCOMPLETE` until managed-prefix inspection is available.
+The entry point performs no installation. Phase 1 evaluation results below
+refer to their original source revisions.
 
 ## v0.1.0 development snapshot
 
@@ -81,7 +81,7 @@ publication are outside v1.0.0.
 
 ### Public variables
 
-These are the v1.0.0 names and defaults to implement, not the current defaults.
+The development branch defines these ten defaults. The Meaning column describes the contract for the completed Role.
 
 | Variable | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -132,9 +132,9 @@ longer rejected. They are neither public inputs nor aliases and do not configure
 this Role. Use the corresponding `ruby_install_` names.
 
 `ruby_install_prefix` and `ruby_install_documentation` retain their adopted
-names. When the Role implementation changes, migration notes, CHANGELOG, examples
-and the input-rejection tests must change together. This documentation step
-does not modify existing callers or implement old-name rejection.
+names. On this branch, remove visible legacy names before
+calling the Role. For example, replace `ruby_version: "3.4.12"` with
+`ruby_install_version: "3.4.12"`. Accepted inputs currently stop before host inspection.
 
 ### Source selection and acquisition
 
