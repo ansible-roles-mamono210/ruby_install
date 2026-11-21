@@ -1,13 +1,33 @@
 ---
-- name: Install the default Ruby and verify rerun decisions
+- name: Install the selected Ruby and verify the entry decision
   hosts: all
   become: true
+  vars_files: [vars/main.yml]
+  pre_tasks:
+    - name: Select the second Ruby only for its three release conditions
+      ansible.builtin.set_fact:
+        ruby_install_version: "{{ ruby_install_test_version }}"
+      when: ruby_install_test_version != '3.4.12'
+
+    - name: Select the custom prefix with standard documentation disabled
+      ansible.builtin.set_fact:
+        ruby_install_prefix: "{{ ruby_install_test_prefix }}"
+        ruby_install_documentation: false
+      when: ruby_install_test_profile == 'custom'
+
+    - name: Check whether the first installation was already snapshotted
+      ansible.builtin.stat:
+        path: /var/tmp/ruby-install-default-baseline.json
+      register: ruby_install_test_baseline
   roles:
     - ruby_install
   post_tasks:
-    - name: Require a verified installation or a healthy unchanged rerun
+    - name: Require a new installation on the first run and a healthy recorded Ruby on reruns
       ansible.builtin.assert:
         that:
           - >-
-            (ruby_install_inspection.state == 'new_install_allowed' and ruby_install_build_result is defined and
-             ruby_install_build_result is changed) or ruby_install_inspection.state == 'installed_healthy'
+            ruby_install_inspection.state ==
+            ('installed_healthy' if ruby_install_test_baseline.stat.exists else 'new_install_allowed')
+          - >-
+            (ruby_install_build_result is defined and ruby_install_build_result is changed) ==
+            (not ruby_install_test_baseline.stat.exists and not ansible_check_mode)

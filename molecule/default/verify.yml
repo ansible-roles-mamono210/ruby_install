@@ -3,21 +3,32 @@
   hosts: all
   gather_facts: false
   become: true
+  vars_files: [vars/main.yml]
   tasks:
     - name: Read the completed installation record
       ansible.builtin.slurp:
-        src: /opt/ruby/.ruby-install-state.json
+        src: "{{ ruby_install_test_prefix }}/.ruby-install-state.json"
       register: ruby_install_record
 
-    - name: Read the actual managed Ruby identity
-      ansible.builtin.command:
-        argv:
-          - /opt/ruby/bin/ruby
-          - --disable=gems,rubyopt
-          - -rrbconfig
-          - -e
-          - 'puts RUBY_VERSION, File.realpath(RbConfig.ruby), RbConfig::CONFIG.fetch("prefix")'
-      register: ruby_install_identity
+    - name: Exercise the installed commands, libraries, JIT and standard documentation
+      ansible.builtin.script:
+        cmd: >-
+          {{ playbook_dir }}/files/check_case.py ruby {{ ruby_install_test_version }}
+          {{ ruby_install_test_prefix }} {{ ruby_install_test_profile }}
+        executable: /usr/bin/python3
+      register: ruby_install_test_runtime
+      changed_when: false
+
+    - name: Read the Rust observation from before installation
+      ansible.builtin.slurp:
+        src: /var/tmp/ruby-install-rust-before.json
+      register: ruby_install_test_rust_before
+
+    - name: Verify the actual Rust environment after the Role
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/files/check_case.py rust {{ ruby_install_test_profile }}"
+        executable: /usr/bin/python3
+      register: ruby_install_test_rust_after
       changed_when: false
 
     - name: Read the snapshot from the first installation
@@ -27,7 +38,7 @@
 
     - name: Read the target state after check mode and idempotence
       ansible.builtin.script:
-        cmd: "{{ playbook_dir }}/../shared/snapshot.py /opt/ruby"
+        cmd: "{{ playbook_dir }}/../shared/snapshot.py {{ ruby_install_test_prefix }}"
         executable: /usr/bin/python3
       register: ruby_install_after
       changed_when: false
@@ -39,20 +50,36 @@
         patterns: ruby-install-*
       register: ruby_install_workspaces
 
-    - name: Require the default contract and identical protected state
+    - name: Require the requested contract and identical protected state
       vars:
         ruby_install_expected_record:
           schema_version: 1
           state: complete
-          ruby_version: "3.4.12"
-          canonical_prefix: /opt/ruby
-          source_sha256: 5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479
+          ruby_version: "{{ ruby_install_test_version }}"
+          canonical_prefix: "{{ ruby_install_test_prefix }}"
+          source_sha256: "{{ ruby_install_test_sha256[ruby_install_test_version] }}"
           shared: true
-          jit: {yjit: false, rjit: false}
-          documentation: true
+          jit: "{{ {'yjit': false, 'rjit': false} if ruby_install_test_version == '3.4.12' else {'yjit': false, 'zjit': false} }}"
+          documentation: "{{ ruby_install_test_docs }}"
       ansible.builtin.assert:
         that:
           - (ruby_install_record.content | b64decode | from_json) == ruby_install_expected_record
-          - ruby_install_identity.stdout_lines == ['3.4.12', '/opt/ruby/bin/ruby', '/opt/ruby']
           - (ruby_install_before.content | b64decode | from_json) == (ruby_install_after.stdout | from_json)
+          - (ruby_install_test_rust_before.content | b64decode | from_json) == (ruby_install_test_rust_after.stdout | from_json)
           - ruby_install_workspaces.matched == 0
+
+    - name: Save this condition's observations for the CI artifacts
+      vars:
+        ruby_install_test_result:
+          condition: "{{ ruby_install_test_condition }}"
+          record: "{{ ruby_install_record.content | b64decode | from_json }}"
+          runtime: "{{ ruby_install_test_runtime.stdout | from_json }}"
+          rust_before: "{{ ruby_install_test_rust_before.content | b64decode | from_json }}"
+          rust_after: "{{ ruby_install_test_rust_after.stdout | from_json }}"
+          after_install: "{{ ruby_install_before.content | b64decode | from_json }}"
+          after_reruns: "{{ ruby_install_after.stdout | from_json }}"
+          workspaces_after_reruns: "{{ ruby_install_workspaces.matched }}"
+      ansible.builtin.copy:
+        dest: /var/tmp/ruby-install-case.json
+        content: "{{ ruby_install_test_result | to_nice_json }}\n"
+        mode: "0600"

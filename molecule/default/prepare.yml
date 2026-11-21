@@ -1,0 +1,58 @@
+---
+- name: Prepare the Ruby release condition on a fresh target
+  hosts: ruby-install-default
+  become: true
+  vars_files: [vars/main.yml]
+  tasks:
+    - name: Require a supported release condition and target
+      ansible.builtin.assert:
+        that:
+          - ruby_install_test_condition is match('^(3\.4\.12|4\.0\.9)-(default|custom|rust)$')
+          - ansible_facts.distribution == 'CentOS' and ansible_facts.distribution_release == 'Stream'
+          - ansible_facts.distribution_major_version == '9' and ansible_facts.architecture == 'x86_64'
+
+    - name: Inspect the reserved prefix and scenario evidence paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ ruby_install_test_prefix }}"
+        - /var/tmp/ruby-install-default-baseline.json
+        - /var/tmp/ruby-install-rust-before.json
+        - /var/tmp/ruby-install-case.json
+      register: ruby_install_test_paths
+
+    - name: Require a fresh target for this installation
+      ansible.builtin.assert:
+        that: ruby_install_test_paths.results | selectattr('stat.exists') | list | length == 0
+
+    - name: Check for the fixture compiler
+      ansible.builtin.stat:
+        path: /usr/bin/rustc
+      register: ruby_install_test_compiler
+
+    - name: Prepare the compiler for the Rust-present condition
+      when: ruby_install_test_rust and not ruby_install_test_compiler.stat.exists
+      block:
+        - name: Require the disposable Molecule Docker target before installing Rust
+          ansible.builtin.assert:
+            that: ansible_connection in ['docker', 'community.docker.docker']
+
+        - name: Install the Rust test fixture
+          ansible.builtin.dnf:
+            name: rust
+            state: present
+            install_weak_deps: false
+
+    - name: Check the actual Rust environment before running the Role
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/files/check_case.py rust {{ ruby_install_test_profile }}"
+        executable: /usr/bin/python3
+      register: ruby_install_test_rust_before
+      changed_when: false
+
+    - name: Preserve the Rust observation taken before installation
+      ansible.builtin.copy:
+        dest: /var/tmp/ruby-install-rust-before.json
+        content: "{{ ruby_install_test_rust_before.stdout | from_json | to_json }}\n"
+        mode: "0600"

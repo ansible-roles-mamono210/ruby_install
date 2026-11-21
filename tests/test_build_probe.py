@@ -3,6 +3,7 @@ import copy
 import gzip
 import hashlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -810,28 +811,31 @@ class HostTests(unittest.TestCase):
             a, b = expr['equal']
             return evaluate(a, values) == evaluate(b, values)
         self.assertFalse(config['parameters']['run_v010_release_checks']['default'])
+        self.assertFalse(config['parameters']['run_v020_release_matrix']['default'])
         for branch in (host.BRANCH, 'main', 'feature/example', ''):
-            for release in (False, True):
-                for build in (False, True):
-                    for env in (False, True):
-                        with self.subTest(branch=branch, release=release, build=build, env=env):
-                            values = {'<< pipeline.parameters.run_p1_build_probe >>': build,
-                                      '<< pipeline.parameters.run_p1_env_probe >>': env,
-                                      '<< pipeline.parameters.run_v010_release_checks >>': release,
-                                      '<< pipeline.git.branch >>': branch}
-                            selected = [name for name, workflow in config['workflows'].items()
-                                        if isinstance(workflow, dict) and evaluate(workflow['when'], values)]
-                            if release:
-                                expected = ['v010-release-checks'] if (
-                                    branch == host.BRANCH and not build and not env) else []
-                            elif branch == host.BRANCH:
-                                expected = ['p1-ruby-build-measurement'] if build and not env else (
-                                    ['p1-environment-measurement'] if env and not build else [])
-                            else:
-                                expected = ['build'] if not env and not build else []
-                            self.assertEqual(selected, expected)
-                            if selected and selected[0].startswith('p1-'):
-                                self.assertEqual(len(config['workflows'][selected[0]]['jobs']), 1)
+            for matrix, release, build, env in itertools.product((False, True), repeat=4):
+                with self.subTest(branch=branch, matrix=matrix, release=release, build=build, env=env):
+                    values = {'<< pipeline.parameters.run_p1_build_probe >>': build,
+                              '<< pipeline.parameters.run_p1_env_probe >>': env,
+                              '<< pipeline.parameters.run_v010_release_checks >>': release,
+                              '<< pipeline.parameters.run_v020_release_matrix >>': matrix,
+                              '<< pipeline.git.branch >>': branch}
+                    selected = [name for name, workflow in config['workflows'].items()
+                                if isinstance(workflow, dict) and evaluate(workflow['when'], values)]
+                    if matrix:
+                        expected = ['v020-release-matrix'] if (
+                            branch and branch != host.BRANCH and not any((release, build, env))) else []
+                    elif release:
+                        expected = ['v010-release-checks'] if (
+                            branch == host.BRANCH and not build and not env) else []
+                    elif branch == host.BRANCH:
+                        expected = ['p1-ruby-build-measurement'] if build and not env else (
+                            ['p1-environment-measurement'] if env and not build else [])
+                    else:
+                        expected = ['build'] if not env and not build else []
+                    self.assertEqual(selected, expected)
+                    if selected and selected[0].startswith('p1-'):
+                        self.assertEqual(len(config['workflows'][selected[0]]['jobs']), 1)
         jobs = config['workflows']['v010-release-checks']['jobs']
         self.assertEqual([next(iter(job)) for job in jobs],
                          ['v010-static-and-probes', 'v010-lint-controls'])

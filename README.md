@@ -528,11 +528,21 @@ Converge, check mode and idempotence each require `installed_healthy` and
 compare the prefix, public commands, installed packages and repository files
 with the pre-run snapshot. The specified build workspace must stay absent.
 The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
-has a 20-minute timeout. The default Molecule scenario installs Ruby 3.4.12
-with standard documentation, reads its Role-generated record, runs check mode
-and idempotence, and compares the prefix, public commands, RPM inventory and
-repository files with their post-installation snapshots. CI keeps the test log
-and captures available build diagnostics before removing its containers.
+has a 20-minute timeout. Ordinary CI runs the default Molecule installation
+condition for Ruby 3.4.12 with documentation enabled.
+
+For a final candidate, run a pipeline on its branch with the boolean parameter
+`run_v020_release_matrix=true` and the other probe flags at their defaults.
+The `v020-release-matrix` workflow runs lint and preflight, then the six rows
+above in order. Each row gets a fresh target and the pinned controller and
+target images. A Rust-present fixture must compile an object before the Role
+runs. Each row checks the Role's installation record, nine managed commands,
+native libraries, build and runtime JIT state, and the requested documentation.
+Check mode and the identical normal rerun must both report zero changes.
+The verifier compares hashes of the prefix, public commands, RPM inventory and
+repository settings before and after these reruns. Each job keeps the Molecule
+log, exit code and, on success, `case.json` and `result.json` under the
+`ruby-install-default` artifacts. A failed job blocks the remaining rows.
 
 The initial full-Role test planning basis is target CPU1, memory limit 2 GiB,
 no additional swap, make jobs 1, one condition at a time and no automatic retries.

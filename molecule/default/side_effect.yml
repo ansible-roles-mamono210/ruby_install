@@ -3,10 +3,11 @@
   hosts: all
   gather_facts: false
   become: true
+  vars_files: [vars/main.yml]
   tasks:
     - name: Read the prefix, public commands, RPMs and repository settings
       ansible.builtin.script:
-        cmd: "{{ playbook_dir }}/../shared/snapshot.py /opt/ruby"
+        cmd: "{{ playbook_dir }}/../shared/snapshot.py {{ ruby_install_test_prefix }}"
         executable: /usr/bin/python3
       register: ruby_install_baseline
       changed_when: false

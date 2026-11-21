@@ -7,6 +7,10 @@ orbs:
   yamllint: orbss/yamllint@0.0.4
 
 parameters:
+  run_v020_release_matrix:
+    type: boolean
+    default: false
+
   run_v010_release_checks:
     type: boolean
     default: false
@@ -109,6 +113,32 @@ jobs:
     steps:
       - v010-checks
 
+  v020-role-condition:
+    machine:
+      image: ubuntu-2204:2023.10.1
+    resource_class: medium
+    parameters:
+      condition:
+        type: enum
+        enum: [3.4.12-default, 3.4.12-custom, 3.4.12-rust, 4.0.9-default, 4.0.9-custom, 4.0.9-rust]
+    environment:
+      MATRIX_CONTROLLER: &v020_controller ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
+      MATRIX_TARGET: &v020_target ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2
+    steps:
+      - checkout:
+          path: ruby_install
+      - run:
+          name: Run one fresh release condition
+          no_output_timeout: 22m
+          command: |
+            set -euo pipefail
+            sudo chmod 666 /var/run/docker.sock
+            cd ruby_install
+            bash molecule/default/run-ci.sh "$MATRIX_CONTROLLER" "$MATRIX_TARGET" "<< parameters.condition >>"
+      - store_artifacts:
+          path: ~/ruby-install-default-evidence
+          destination: ruby-install-default
+
   p1-ruby-build:
     machine:
       image: ubuntu-2204:2023.10.1
@@ -204,6 +234,9 @@ jobs:
                   docker run --rm --entrypoint python3 \
                     -v "$PWD":/tmp/ruby_install:ro -w /tmp/ruby_install << parameters.molecule-docker-executor-image >> \
                     -B tests/preflight/run.py
+                  docker run --rm --entrypoint python3 \
+                    -v "$PWD":/tmp/ruby_install:ro -w /tmp/ruby_install << parameters.molecule-docker-executor-image >> \
+                    -B tests/test_release_matrix.py
       - run:
           name: Test with Molecule
           no_output_timeout: << parameters.molecule-no-output-timeout >>
@@ -276,6 +309,7 @@ workflows:
   p1-ruby-build-measurement:
     when:
       and:
+        - not: << pipeline.parameters.run_v020_release_matrix >>
         - not: << pipeline.parameters.run_v010_release_checks >>
         - << pipeline.parameters.run_p1_build_probe >>
         - not: << pipeline.parameters.run_p1_env_probe >>
@@ -285,6 +319,7 @@ workflows:
   p1-environment-measurement:
     when:
       and:
+        - not: << pipeline.parameters.run_v020_release_matrix >>
         - not: << pipeline.parameters.run_v010_release_checks >>
         - << pipeline.parameters.run_p1_env_probe >>
         - not: << pipeline.parameters.run_p1_build_probe >>
@@ -294,6 +329,7 @@ workflows:
   build:
     when:
       and:
+        - not: << pipeline.parameters.run_v020_release_matrix >>
         - not: << pipeline.parameters.run_v010_release_checks >>
         - not: << pipeline.parameters.run_p1_build_probe >>
         - not: << pipeline.parameters.run_p1_env_probe >>
@@ -310,10 +346,10 @@ workflows:
       - molecule:
           name: preflight
           checkout-path: ruby_install
-          molecule-docker-executor-image: ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
+          molecule-docker-executor-image: *v020_controller
           molecule-scenario-name: preflight
           molecule-no-output-timeout: 22m
-          molecule-test-image: ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2
+          molecule-test-image: *v020_target
           requires:
             - ansible-lint
           filters:
@@ -336,6 +372,7 @@ workflows:
   v010-release-checks:
     when:
       and:
+        - not: << pipeline.parameters.run_v020_release_matrix >>
         - << pipeline.parameters.run_v010_release_checks >>
         - not: << pipeline.parameters.run_p1_build_probe >>
         - not: << pipeline.parameters.run_p1_env_probe >>
@@ -349,3 +386,52 @@ workflows:
           filters:
             tags:
               ignore: /.*/
+  v020-release-matrix:
+    when:
+      and:
+        - << pipeline.parameters.run_v020_release_matrix >>
+        - not: << pipeline.parameters.run_v010_release_checks >>
+        - not: << pipeline.parameters.run_p1_build_probe >>
+        - not: << pipeline.parameters.run_p1_env_probe >>
+        - not:
+            equal: [plan/ruby-100-p1-env-r1, << pipeline.git.branch >>]
+        - not:
+            equal: ['', << pipeline.git.branch >>]
+    jobs:
+      - trailing-whitespace
+      - yamllint:
+          requires: [trailing-whitespace]
+      - ansible-lint:
+          requires: [yamllint]
+      - molecule:
+          name: preflight
+          checkout-path: ruby_install
+          molecule-docker-executor-image: *v020_controller
+          molecule-test-image: *v020_target
+          molecule-scenario-name: preflight
+          molecule-no-output-timeout: 22m
+          requires: [ansible-lint]
+      - v020-role-condition:
+          name: ruby-3.4.12-default
+          condition: 3.4.12-default
+          requires: [preflight]
+      - v020-role-condition:
+          name: ruby-3.4.12-custom
+          condition: 3.4.12-custom
+          requires: [ruby-3.4.12-default]
+      - v020-role-condition:
+          name: ruby-3.4.12-rust
+          condition: 3.4.12-rust
+          requires: [ruby-3.4.12-custom]
+      - v020-role-condition:
+          name: ruby-4.0.9-default
+          condition: 4.0.9-default
+          requires: [ruby-3.4.12-rust]
+      - v020-role-condition:
+          name: ruby-4.0.9-custom
+          condition: 4.0.9-custom
+          requires: [ruby-4.0.9-default]
+      - v020-role-condition:
+          name: ruby-4.0.9-rust
+          condition: 4.0.9-rust
+          requires: [ruby-4.0.9-custom]

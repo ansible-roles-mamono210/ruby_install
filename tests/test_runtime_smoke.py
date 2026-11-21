@@ -844,6 +844,7 @@ class RuntimeHostTests(unittest.TestCase):
         workflow = after['workflows']['p1-environment-measurement']
         self.assertEqual(workflow['jobs'], ['p1-environment'])
         self.assertEqual(workflow['when']['and'], [
+            {'not': '<< pipeline.parameters.run_v020_release_matrix >>'},
             {'not': '<< pipeline.parameters.run_v010_release_checks >>'},
             '<< pipeline.parameters.run_p1_env_probe >>',
             {'not': '<< pipeline.parameters.run_p1_build_probe >>'},
