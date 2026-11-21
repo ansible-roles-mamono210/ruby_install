@@ -2,8 +2,9 @@
 galaxy_info:
   role_name: ruby_install
   author: mamono210
-  description: Phase 1 specification and evaluation development snapshot; new Role contract unimplemented.
+  description: Development Role for Ruby on CentOS Stream 9 with controller-side input validation.
   company: no name
   license: BSD-3-Clause
+  min_ansible_version: "2.21.6"
   galaxy_tags: []
 dependencies: []

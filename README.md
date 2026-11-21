@@ -5,7 +5,8 @@
 A development snapshot of specifications and evaluation tooling for a
 future Ruby installation Role on CentOS Stream 9.
 
-**v0.2.0 development branch.** The Role now checks the public input types,
+**v0.2.0 development branch.** The minimum controller version for this branch
+is ansible-core 2.21.6. The Role now checks the public input types,
 selected command names and legacy variable names on the controller. A valid
 link request stops with `LINKS_UNAVAILABLE`. Other accepted inputs reach
 `PREFLIGHT_INCOMPLETE` until managed-prefix inspection is available.
@@ -43,9 +44,8 @@ git rev-parse HEAD
 Candidate checks use the complete candidate SHA, record file hashes and retrieve
 that SHA independently. After publication, the tag must be compared with that
 approved SHA before using the snapshot. No `v0.1.0` tag is claimed to exist here.
-Metadata does not advertise a tested minimum Ansible version or general EL
-support. Omitting those fields does not imply support for every version.
-The fixed environments below describe evaluations, not legacy Role compatibility.
+The v0.1.0 metadata omits a minimum Ansible version and supported EL platforms.
+The fixed environments below describe the Phase 1 evaluations.
 
 ## v1.0.0 contract
 
