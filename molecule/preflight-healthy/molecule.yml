@@ -1,0 +1,33 @@
+---
+driver:
+  name: docker
+platforms:
+  - name: ruby-install-healthy
+    image: ${MOLECULE_IMAGE}
+    pre_build_image: true
+    cpus: 1
+    memory: 2G
+    memory_swap: 2G
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: "$HOME/.ansible/roles/:/tmp"
+  inventory:
+    group_vars:
+      all:
+        ruby_install_version: "3.4.12"
+        ruby_install_prefix: /opt/ruby-preflight-healthy/ruby
+        ruby_install_documentation: false
+        ruby_install_workspace: /opt/ruby-preflight-healthy/absent-workspace
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - syntax
+    - create
+    - prepare
+    - converge
+    - check
+    - idempotence
+    - destroy

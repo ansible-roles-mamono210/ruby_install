@@ -1,0 +1,22 @@
+---
+- name: Verify a healthy Ruby rerun without a build workspace
+  hosts: ruby-install-healthy
+  gather_facts: true
+  roles:
+    - ruby_install
+  post_tasks:
+    - name: Require the healthy result from the Role
+      ansible.builtin.assert:
+        that:
+          - ruby_install_inspection.state == 'installed_healthy'
+          - ruby_install_inspection is not changed
+
+    - name: Compare protected state with the snapshot taken before the first Role run
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -B
+          - /opt/ruby-preflight-healthy/healthy_fixture.py
+          - verify
+      check_mode: false
+      changed_when: false

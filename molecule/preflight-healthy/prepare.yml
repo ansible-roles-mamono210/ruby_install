@@ -1,0 +1,58 @@
+---
+- name: Prepare a separately built Ruby on the disposable target
+  hosts: ruby-install-healthy
+  gather_facts: true
+  vars:
+    ruby_install_fixture_dir: /opt/ruby-preflight-healthy
+  tasks:
+    - name: Inspect the reserved fixture directory
+      ansible.builtin.stat:
+        path: "{{ ruby_install_fixture_dir }}"
+        follow: false
+      register: ruby_install_fixture_dir_stat
+
+    - name: Require a fresh CentOS Stream 9 x86_64 test container
+      ansible.builtin.assert:
+        that:
+          - ansible_connection in ['docker', 'community.docker.docker']
+          - ansible_facts.distribution == 'CentOS'
+          - ansible_facts.distribution_release == 'Stream'
+          - ansible_facts.distribution_major_version == '9'
+          - ansible_facts.architecture == 'x86_64'
+          - ansible_facts.user_uid == 0
+          - not ruby_install_fixture_dir_stat.stat.exists
+
+    - name: Install build dependencies for the test fixture
+      ansible.builtin.dnf:
+        name: [gcc, make, tar, gzip, ca-certificates, openssl-devel, libyaml-devel, zlib-devel, libffi-devel]
+        enablerepo: crb
+        state: present
+
+    - name: Create the private fixture directory
+      ansible.builtin.file:
+        path: "{{ ruby_install_fixture_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Copy the fixture builder, verified archive helpers and record constructor
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ ruby_install_fixture_dir }}/{{ item | basename }}"
+        mode: "0600"
+      loop:
+        - "{{ playbook_dir }}/files/healthy_fixture.py"
+        - "{{ playbook_dir }}/../../scripts/p1/source_container_probe.py"
+        - "{{ playbook_dir }}/../../scripts/p1/build_container_probe.py"
+        - "{{ playbook_dir }}/../../module_utils/ruby_install_preflight/state.py"
+
+    - name: Build the verified source and record the target baseline
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/timeout
+          - --kill-after=20s
+          - 20m
+          - /usr/bin/python3
+          - -B
+          - "{{ ruby_install_fixture_dir }}/healthy_fixture.py"
+          - prepare
+      changed_when: true

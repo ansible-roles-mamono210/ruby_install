@@ -520,9 +520,17 @@ requirements, not names of existing Molecule scenarios or CI jobs:
 On the v0.2.0 feature branch, the `preflight` CI job uses the pinned controller
 and target images. It runs target Python unit tests, controller-only entry
 cases and the `molecule/preflight` scenario through the normal Role entry.
-The scenario checks an absent prefix in normal and check mode, and confirms
-that an unmanaged Ruby is preserved without execution. The successful rerun
-against a Ruby built and recorded by the Role requires the Phase 3 writer. Interim
+The first scenario checks an absent prefix in normal and check mode and
+confirms that an unmanaged Ruby is preserved without execution. When pushed to
+`feature/v0.2.0-install`, the same job also runs `molecule/preflight-healthy`. Its fixture
+builds the official Ruby 3.4.12 tar.gz with documentation disabled and creates
+a test record from the installed Ruby and verified source digest.
+Converge, check mode and idempotence each require `installed_healthy` and
+compare the prefix, public commands, installed packages and repository files
+with the pre-run snapshot. The specified build workspace must stay absent.
+The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
+has a 20-minute timeout. The final rerun using a record written during a
+Role installation requires the Phase 3 writer. Interim
 preflight-only tests do not replace the normal four CI categories required by
 v0.2.0 and later. A workflow that did not run is not a passing test.
 

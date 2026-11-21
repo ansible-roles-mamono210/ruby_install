@@ -181,6 +181,9 @@ jobs:
         type: string
       molecule-scenario-name:
         type: string
+      molecule-no-output-timeout:
+        type: string
+        default: 10m
       molecule-test-image:
         type: string
     steps:
@@ -203,20 +206,28 @@ jobs:
                     -B tests/preflight/run.py
       - run:
           name: Test with Molecule
+          no_output_timeout: << parameters.molecule-no-output-timeout >>
           command: |
+            set -euo pipefail
             sudo chmod 666 /var/run/docker.sock
 
             cd << parameters.checkout-path >>
 
-            docker run --rm -it \
-            -e ANSIBLE_FORCE_COLOR=1 \
-            -e MOLECULE_IMAGE=<< parameters.molecule-test-image >> \
-            -v "$(pwd)":/tmp/$(basename "${PWD}"):ro \
-            -v /usr/bin/docker:/usr/bin/docker \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -w /tmp/$(basename "${PWD}") \
-            << parameters.molecule-docker-executor-image >> \
-            molecule test --scenario-name << parameters.molecule-scenario-name >>
+            scenarios=("<< parameters.molecule-scenario-name >>")
+            if [[ "<< parameters.molecule-scenario-name >>" == preflight ]]; then
+              scenarios+=(preflight-healthy)
+            fi
+            for scenario in "${scenarios[@]}"; do
+              docker run --rm -it \
+                -e ANSIBLE_FORCE_COLOR=1 \
+                -e MOLECULE_IMAGE=<< parameters.molecule-test-image >> \
+                -v "$(pwd)":/tmp/$(basename "${PWD}"):ro \
+                -v /usr/bin/docker:/usr/bin/docker \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                -w /tmp/$(basename "${PWD}") \
+                << parameters.molecule-docker-executor-image >> \
+                molecule test --scenario-name "$scenario"
+            done
       - run:
           name: Show Ansible version
           command: |
@@ -290,6 +301,7 @@ workflows:
           checkout-path: ruby_install
           molecule-docker-executor-image: ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
           molecule-scenario-name: preflight
+          molecule-no-output-timeout: 22m
           molecule-test-image: ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2
           requires:
             - ansible-lint
