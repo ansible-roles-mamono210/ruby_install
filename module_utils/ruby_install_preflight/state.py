@@ -26,8 +26,11 @@ class Stop(Exception):
 def identity(info):
     if info is None:
         return None
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
-            None if stat.S_ISDIR(info.st_mode) else info.st_ctime_ns)
+    key = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+    if stat.S_ISDIR(info.st_mode):
+        # Unrelated entries may be created in a shared directory during inspection.
+        return key
+    return key + (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def lstat(path):

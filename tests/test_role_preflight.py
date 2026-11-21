@@ -80,6 +80,7 @@ class Observations(unittest.TestCase):
         self.public.mkdir()
         self.nobody = set()
         self.sep_fs = False
+        self.observed_times = {}
         orig_lstat, orig_fstat = state.lstat, os.fstat
         ancestors = set(self.root.parents)
         def attrs(s, path=None):
@@ -88,9 +89,10 @@ class Observations(unittest.TestCase):
             mode = s.st_mode
             if path in ancestors:
                 mode &= ~0o022
+            mtime, ctime = self.observed_times.get(path, (s.st_mtime_ns, s.st_ctime_ns))
             return SimpleNamespace(st_mode=mode, st_dev=s.st_dev + int(self.sep_fs and path == self.work),
                                    st_uid=1000 if path in self.nobody else 0, st_gid=0,
-                                   st_ino=s.st_ino, st_ctime_ns=s.st_ctime_ns)
+                                   st_ino=s.st_ino, st_size=s.st_size, st_mtime_ns=mtime, st_ctime_ns=ctime)
         for hook in (patch.object(state, "lstat", side_effect=lambda path: attrs(orig_lstat(path), path)),
                      patch.object(os, "fstat", side_effect=lambda fd: attrs(orig_fstat(fd)))):
             hook.start()
@@ -268,8 +270,37 @@ class Observations(unittest.TestCase):
     def test_identity_change_during_health(self):
         binary = self.binary()
         self.record()
-        self.probe.side_effect = lambda *unused: binary.write_text("changed by another actor")
+        before = binary.stat()
+        # A quick write can have the same observed timestamps as the preceding write.
+        self.observed_times[binary] = (before.st_mtime_ns, before.st_ctime_ns)
+        self.probe.side_effect = lambda *unused: binary.write_bytes(b"x" * (before.st_size + 1))
         self.stopped("UNSAFE_PATH")
+
+    def test_same_size_write_with_changed_mtime_during_health(self):
+        binary = self.binary()
+        self.record()
+        before = binary.stat()
+        self.observed_times[binary] = (before.st_mtime_ns, before.st_ctime_ns)
+
+        def rewrite(*unused):
+            binary.write_bytes(b"x" * before.st_size)
+            self.observed_times[binary] = (before.st_mtime_ns + 1_000_000_000, before.st_ctime_ns)
+
+        self.probe.side_effect = rewrite
+        self.stopped("UNSAFE_PATH")
+
+    def test_unrelated_directory_activity_during_health(self):
+        self.binary()
+        self.record()
+        before = self.root.stat()
+        self.observed_times[self.root] = (before.st_mtime_ns, before.st_ctime_ns)
+
+        def write_sibling(*unused):
+            (self.root / "other").touch()
+            self.observed_times[self.root] = (before.st_mtime_ns + 1_000_000_000, before.st_ctime_ns + 1_000_000_000)
+
+        self.probe.side_effect = write_sibling
+        self.assertEqual(self.inspect(), "installed_healthy")
 
     def test_missing_runtime_tree_stops_before_launching_ruby(self):
         self.binary()
