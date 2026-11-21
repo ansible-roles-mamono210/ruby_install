@@ -1,0 +1,82 @@
+---
+- name: Exercise preflight on a disposable CentOS Stream target
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Create an isolated test directory
+      ansible.builtin.tempfile:
+        path: /opt
+        state: directory
+        prefix: ruby-preflight-
+      register: ruby_install_fixture
+
+    - name: Observe the Role entry and protected filesystem state
+      block:
+        - name: Exercise the absent prefix in normal and check mode
+          ansible.builtin.include_tasks: tasks/expect_stop.yml
+          loop: [false, true]
+          vars:
+            ruby_install_test_check_mode: "{{ item }}"
+            ruby_install_prefix: "{{ ruby_install_fixture.path }}/new"
+            ruby_install_test_reason: "INSTALLATION_PENDING:"
+
+        - name: Inspect the new installation path
+          ansible.builtin.stat:
+            path: "{{ ruby_install_fixture.path }}/new"
+          register: ruby_install_absent
+
+        - name: Confirm no installation directory was created
+          ansible.builtin.assert:
+            that: not ruby_install_absent.stat.exists
+
+        - name: Make a directory for an unmanaged installation
+          ansible.builtin.file:
+            path: "{{ ruby_install_fixture.path }}/unmanaged/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Place a sentinel executable that would leave a marker if invoked
+          ansible.builtin.copy:
+            dest: "{{ ruby_install_fixture.path }}/unmanaged/bin/ruby"
+            mode: "0755"
+            content: |
+              #!/bin/sh
+              touch "$(dirname "$0")/was-executed"
+
+        - name: Snapshot the unmanaged executable
+          ansible.builtin.stat:
+            path: "{{ ruby_install_fixture.path }}/unmanaged/bin/ruby"
+            checksum_algorithm: sha256
+          register: ruby_install_before
+
+        - name: Exercise the unmanaged installation
+          ansible.builtin.include_tasks: tasks/expect_stop.yml
+          vars:
+            ruby_install_prefix: "{{ ruby_install_fixture.path }}/unmanaged"
+            ruby_install_test_reason: "INSTALL_RECORD_INVALID:"
+
+        - name: Recheck the unmanaged executable
+          ansible.builtin.stat:
+            path: "{{ ruby_install_fixture.path }}/unmanaged/bin/ruby"
+            checksum_algorithm: sha256
+          register: ruby_install_after
+
+        - name: Inspect the execution marker
+          ansible.builtin.stat:
+            path: "{{ ruby_install_fixture.path }}/unmanaged/bin/was-executed"
+          register: ruby_install_marker
+
+        - name: Confirm the existing executable was preserved
+          ansible.builtin.assert:
+            that:
+              - not ruby_install_marker.stat.exists
+              - ruby_install_before.stat.checksum == ruby_install_after.stat.checksum
+              - ruby_install_before.stat.mode == ruby_install_after.stat.mode
+              - ruby_install_before.stat.uid == ruby_install_after.stat.uid
+              - ruby_install_before.stat.gid == ruby_install_after.stat.gid
+              - ruby_install_before.stat.mtime == ruby_install_after.stat.mtime
+      always:
+        - name: Remove this scenario's temporary directory
+          ansible.builtin.file:
+            path: "{{ ruby_install_fixture.path }}"
+            state: absent

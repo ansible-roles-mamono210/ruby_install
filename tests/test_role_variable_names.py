@@ -1,4 +1,5 @@
 """Real source controls, traversal boundaries and host evidence validation."""
+import base64
 import copy
 import importlib.util
 from importlib import metadata
@@ -13,6 +14,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def p1_snapshot():
+    # The Phase 1 controls compare against the original legacy variable names.
+    raw = (ROOT / 'tests/fixtures/p1_role_defaults.txt').read_bytes()
+    return {'defaults/main.yml': base64.b64encode(raw).decode('ascii')}
 
 
 def load(name, relative):
@@ -34,7 +41,7 @@ except metadata.PackageNotFoundError:
 @unittest.skipUnless(REAL_LINT, 'requires ansible-lint 26.1.1')
 class RealControls(unittest.TestCase):
     def test_real_source_and_eight_controls_with_host_validation(self):
-        result = worker.run(checker, checker.collect(ROOT), host.SOURCE_HASH)
+        result = worker.run(checker, p1_snapshot(), host.SOURCE_HASH)
         self.assertEqual([c['result']['exit_code'] for c in result['cases']], [2, 0, 2, 2, 3, 3, 3, 3])
         self.assertEqual(sum(len(c['result'].get('diagnostics', [])) for c in result['cases']), 6)
         # Synthetic runtime fields exercise the host validator, never become CI evidence.
@@ -55,10 +62,13 @@ class RealControls(unittest.TestCase):
                 if change == 'cleanup': bad['temporary_directory_removed'] = False
                 with self.assertRaises(host.Stop): host.validate(bad)
 
+    def test_current_defaults_pass_variable_naming(self):
+        self.assertEqual(checker.check(ROOT)['exit_code'], 0)
+
     def test_disabling_rule_is_detected(self):
         with patch.object(checker, 'CONFIG', '---\nwarn_list: []\nskip_list: [var-naming]\n'):
             with self.assertRaisesRegex(worker.Stop, '^CONTROL_MATRIX$'):
-                worker.run(checker, checker.collect(ROOT), host.SOURCE_HASH)
+                worker.run(checker, p1_snapshot(), host.SOURCE_HASH)
 
     def test_unknown_stderr_and_zero_processed_are_rejected(self):
         snapshot = {'defaults/main.yml': checker.base64.b64encode(b'---\nruby_install_version: fixture\n').decode()}
@@ -157,6 +167,7 @@ class Boundaries(unittest.TestCase):
                     patch.object(host, 'load', side_effect=lambda n: modules[n]), \
                     patch.object(host.os, 'stat', side_effect=fixture_stat), \
                     patch.object(host, 'inspect_image', return_value={}), \
+                    patch.object(checker, 'collect', return_value=p1_snapshot()), \
                     patch.object(host, 'run_worker', side_effect=host.Stop('WORKER_TIMEOUT')):
                 output = Path(tmp) / 'result.json'
                 self.assertEqual(host.main(['--output', str(output), '--allow-pull', '--ephemeral-ci', '--allow-role-vars']), 3)

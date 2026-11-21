@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-PENDING = "PREFLIGHT_INCOMPLETE:"
+MISSING_FACTS = "UNSUPPORTED_TARGET:"
 INVALID = "INVALID_INPUT:"
 
 
@@ -16,13 +16,13 @@ def entry_cases():
     def case(name, expected, **inputs):
         cases[name] = {"expected_reason": expected, **inputs}
 
-    case("defaults", PENDING)
+    case("defaults", MISSING_FACTS)
     for name in ("workspace", "ruby_version", "ruby_download_url", "ruby_make_prefix",
                  "ruby_source_configure_command"):
         case("legacy_" + name, "LEGACY_INPUT: " + name + ".", **{name: None})
     case("old_and_new", "LEGACY_INPUT: ruby_version.", ruby_version="",
          ruby_install_version="3.4.12")
-    case("discarded_proposal_names", PENDING, ruby_build_jobs=False, ruby_download_checksum=42,
+    case("discarded_proposal_names", MISSING_FACTS, ruby_build_jobs=False, ruby_download_checksum=42,
          ruby_create_symlinks=True, ruby_symlink_commands=0, ruby_keep_build_workspace=None)
     for name in ("version", "prefix", "workspace", "download_url", "download_checksum"):
         case("bad_" + name, INVALID, **{"ruby_install_" + name: 4})
@@ -33,9 +33,19 @@ def entry_cases():
     for i, value in enumerate(("ruby", {"ruby": True}, ["ruby", 1], ["gem", "gem"],
                                ["Ruby"], ["bin/ruby"])):
         case("bad_commands_" + str(i), INVALID, ruby_install_symlink_commands=value)
-    case("empty_off", PENDING, ruby_install_symlink_commands=[], ruby_install_build_jobs=4)
+    case("empty_off", MISSING_FACTS, ruby_install_symlink_commands=[], ruby_install_build_jobs=4)
     case("empty_on", INVALID, ruby_install_symlink_commands=[], ruby_install_create_symlinks=True)
     case("links_on", "LINKS_UNAVAILABLE:", ruby_install_create_symlinks=True)
+
+    for i, value in enumerate(("3.4", "3.4.12-rc1", "4.1.0")):
+        case("invalid_version_" + str(i), INVALID, ruby_install_version=value)
+    case("unknown_digest", INVALID, ruby_install_version="3.4.99")
+    case("explicit_url_needs_digest", INVALID, ruby_install_download_url="https://example.org/ruby")
+    case("relative_prefix", INVALID, ruby_install_prefix="opt/ruby")
+    case("shared_prefix", INVALID, ruby_install_prefix="/usr/local")
+    case("overlap", INVALID, ruby_install_prefix="/opt/ruby", ruby_install_workspace="/opt/ruby/tmp")
+    case("valid_custom", MISSING_FACTS, ruby_install_version="4.0.10",
+         ruby_install_download_url="https://example.org/ruby", ruby_install_download_checksum="sha256:" + "1" * 64)
 
     return cases
 

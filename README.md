@@ -6,12 +6,15 @@ A development snapshot of specifications and evaluation tooling for a
 future Ruby installation Role on CentOS Stream 9.
 
 **v0.2.0 development branch.** The minimum controller version for this branch
-is ansible-core 2.21.6. The Role now checks the public input types,
-selected command names and legacy variable names on the controller. A valid
-link request stops with `LINKS_UNAVAILABLE`. Other accepted inputs reach
-`PREFLIGHT_INCOMPLETE` until managed-prefix inspection is available.
-The entry point performs no installation. Phase 1 evaluation results below
-refer to their original source revisions.
+is ansible-core 2.21.6. The Role validates native input types, supported
+versions, HTTPS sources, SHA-256 digests and dedicated paths. Gather target
+facts and run with root privileges on CentOS Stream 9 x86_64.
+A new installation candidate stops with `INSTALLATION_PENDING` after the
+workspace, capacity and residual-link checks. The build stage is in development.
+An existing prefix requires a trusted installation record and matching managed
+Ruby, build settings and libraries for a successful unchanged rerun. Unrecorded
+Ruby stops before execution. Link requests stop with `LINKS_UNAVAILABLE`.
+Phase 1 evaluation results below refer to their original revisions.
 
 ## v0.1.0 development snapshot
 
@@ -134,7 +137,7 @@ this Role. Use the corresponding `ruby_install_` names.
 `ruby_install_prefix` and `ruby_install_documentation` retain their adopted
 names. On this branch, remove visible legacy names before
 calling the Role. For example, replace `ruby_version: "3.4.12"` with
-`ruby_install_version: "3.4.12"`. Accepted inputs currently stop before host inspection.
+`ruby_install_version: "3.4.12"`. Valid values proceed to read-only inspection of the target prefix.
 
 ### Source selection and acquisition
 
@@ -514,9 +517,12 @@ requirements, not names of existing Molecule scenarios or CI jobs:
 | T12–T14 | Owned-workspace success/failure handling, fixed-ref Role distribution, cleanup of test containers with required failure evidence retained |
 | T15 | The five rejected old names, including externally visible definitions; wrong types, invalid versions, checksum/URL errors, command-list errors and unsafe paths; workspace environment failures for new installs and healthy-rerun controls that skip those checks |
 
-Phase 2 integration tests are planned as a Molecule scenario, with unit tests
-also running on target Python 3.9 and module discovery/lint checked in the fixed
-environments. These scenarios and CI jobs are not implemented yet. Interim
+On the v0.2.0 feature branch, the `preflight` CI job uses the pinned controller
+and target images. It runs target Python unit tests, controller-only entry
+cases and the `molecule/preflight` scenario through the normal Role entry.
+The scenario checks an absent prefix in normal and check mode, and confirms
+that an unmanaged Ruby is preserved without execution. The successful rerun
+against a Ruby built and recorded by the Role requires the Phase 3 writer. Interim
 preflight-only tests do not replace the normal four CI categories required by
 v0.2.0 and later. A workflow that did not run is not a passing test.
 

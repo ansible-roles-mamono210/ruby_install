@@ -2,7 +2,7 @@
 galaxy_info:
   role_name: ruby_install
   author: mamono210
-  description: Development Role for Ruby on CentOS Stream 9 with controller-side input validation.
+  description: Development Role for Ruby on CentOS Stream 9 with read-only installation checks.
   company: no name
   license: BSD-3-Clause
   min_ansible_version: "2.21.6"

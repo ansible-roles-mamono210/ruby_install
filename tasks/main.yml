@@ -2,6 +2,36 @@
 - name: Validate public inputs before target inspection
   ansible.builtin.import_tasks: preflight.yml
 
-- name: Stop before host inspection on the development branch
-  ansible.builtin.fail:
-    msg: "PREFLIGHT_INCOMPLETE: managed-prefix inspection is pending; installation is unavailable."
+- name: Inspect the managed Ruby installation
+  vars:
+    ruby_install_resolved: >-
+      {{ ruby_install_version | ruby_install_resolve_inputs(ruby_install_download_url, ruby_install_download_checksum,
+      ruby_install_prefix, ruby_install_workspace) }}
+  block:
+    - name: Validate version, source checksum and dedicated paths
+      ansible.builtin.assert:
+        that: ruby_install_resolved.error == ''
+        fail_msg: "{{ ruby_install_resolved.error }}"
+
+    - name: Require supported target facts
+      ansible.builtin.assert:
+        that:
+          - (ansible_facts.distribution | default('')) == 'CentOS'
+          - (ansible_facts.distribution_major_version | default('')) == '9'
+          - (ansible_facts.distribution_release | default('')) == 'Stream'
+          - (ansible_facts.architecture | default('')) == 'x86_64'
+        fail_msg: "UNSUPPORTED_TARGET: gather facts for a CentOS Stream 9 x86_64 target."
+
+    - name: Classify the prefix without changing the host
+      ruby_install_inspect:
+        version: "{{ ruby_install_version }}"
+        prefix: "{{ ruby_install_resolved.prefix }}"
+        workspace: "{{ ruby_install_resolved.workspace }}"
+        digest: "{{ ruby_install_resolved.sha256 }}"
+        documentation: "{{ ruby_install_documentation }}"
+      register: ruby_install_inspection
+
+    - name: Stop at the new installation boundary
+      ansible.builtin.fail:
+        msg: "INSTALLATION_PENDING: preflight allows new installation. The build stage is pending."
+      when: ruby_install_inspection.state == 'new_install_allowed'

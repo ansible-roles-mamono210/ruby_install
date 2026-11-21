@@ -186,6 +186,21 @@ jobs:
     steps:
       - checkout:
           path: << parameters.checkout-path >>
+      - when:
+          condition:
+            equal: [preflight, << parameters.molecule-scenario-name >>]
+          steps:
+            - run:
+                name: Test target state and controller-only entry cases
+                command: |
+                  set -eu
+                  cd << parameters.checkout-path >>
+                  docker run --rm --entrypoint /usr/bin/python3 \
+                    -v "$PWD":/role:ro -w /role << parameters.molecule-test-image >> \
+                    -B -m unittest discover -s tests -p test_role_preflight.py
+                  docker run --rm --entrypoint python3 \
+                    -v "$PWD":/tmp/ruby_install:ro -w /tmp/ruby_install << parameters.molecule-docker-executor-image >> \
+                    -B tests/preflight/run.py
       - run:
           name: Test with Molecule
           command: |
@@ -270,6 +285,17 @@ workflows:
       - ansible-lint:
           requires:
             - yamllint
+      - molecule:
+          name: preflight
+          checkout-path: ruby_install
+          molecule-docker-executor-image: ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
+          molecule-scenario-name: preflight
+          molecule-test-image: ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2
+          requires:
+            - ansible-lint
+          filters:
+            branches:
+              only: feature/v0.2.0-install
       - molecule:
           matrix:
             parameters:

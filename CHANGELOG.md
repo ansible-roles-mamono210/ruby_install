@@ -5,8 +5,13 @@
 - Replace the four legacy defaults with ten public inputs. Reject the five
   documented legacy names when visible, including null values.
 - Check native types, positive build parallelism and the selected command
-  list. Stop link requests and all installation attempts before host inspection
-  while the remaining preflight stages are under development.
+  list. Resolve the version, HTTPS source, SHA-256 and absolute paths.
+- Inspect existing prefixes and records without modifying them. Only new
+  candidates require the build workspace and space allowance. They stop with
+  `INSTALLATION_PENDING` while the build stage is in development.
+- Check the managed Ruby and required libraries on recorded reruns, and look
+  for remaining public links when publication is disabled. Link creation is
+  scheduled for v0.3.0.
 
 ## v0.1.0 — specification and evaluation snapshot
 

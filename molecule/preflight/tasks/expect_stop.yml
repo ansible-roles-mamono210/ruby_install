@@ -1,0 +1,17 @@
+---
+- name: Check the expected Role stop
+  block:
+    - name: Invoke the normal Role entry
+      ansible.builtin.include_role:
+        name: ruby_install
+        apply:
+          check_mode: "{{ ruby_install_test_check_mode | default(false) }}"
+    - name: Detect unexpected Role completion
+      ansible.builtin.fail:
+        msg: Unexpected Role completion
+  rescue:
+    - name: Check the reported reason
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg.startswith(ruby_install_test_reason)
+          - not (ansible_failed_result.changed | default(false))
