@@ -1,0 +1,72 @@
+---
+- name: Create a private directory for the acquisition checks
+  ansible.builtin.tempfile:
+    state: directory
+    path: /opt
+    prefix: ruby-acquisition-
+  register: ruby_install_tls_fixture
+
+- name: Exercise the Role against disposable loopback endpoints
+  vars:
+    ruby_install_tls_dir: "{{ ruby_install_tls_fixture.path }}"
+  block:
+    - name: Stage the loopback fixture and its shared test server
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ ruby_install_tls_dir }}/{{ item | basename }}"
+        mode: "0600"
+      loop:
+        - "{{ playbook_dir }}/../../scripts/p1/download_guard_fixture.py"
+        - "{{ playbook_dir }}/files/acquisition_fixture.py"
+
+    - name: Start the bounded fixture on the target
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -B, "{{ ruby_install_tls_dir }}/acquisition_fixture.py", "{{ ruby_install_tls_dir }}"]
+      async: 270
+      poll: 0
+      changed_when: true
+      register: ruby_install_tls_job
+
+    - name: Run the failure cases through the normal Role entry
+      block:
+        - name: Wait for the loopback endpoints
+          ansible.builtin.wait_for:
+            path: "{{ ruby_install_tls_dir }}/ready.json"
+            timeout: 20
+
+        - name: Read the case inputs
+          ansible.builtin.slurp:
+            src: "{{ ruby_install_tls_dir }}/ready.json"
+          register: ruby_install_tls_ready
+
+        - name: Match each stopped installation to its expected stage and workspace
+          ansible.builtin.include_tasks: acquisition_stop.yml
+          loop: "{{ ruby_install_tls_ready.content | b64decode | from_json }}"
+          loop_control:
+            loop_var: ruby_install_tls_case
+            label: "{{ ruby_install_tls_case.name }}"
+      always:
+        - name: Stop the fixture and check its requests and retained workspaces
+          ansible.builtin.copy:
+            dest: "{{ ruby_install_tls_dir }}/stop"
+            content: "done\n"
+            mode: "0600"
+
+        - name: Require the fixture to finish all evidence checks
+          ansible.builtin.async_status:
+            jid: "{{ ruby_install_tls_job.ansible_job_id }}"
+          register: ruby_install_tls_completion
+          until: ruby_install_tls_completion.finished
+          retries: 12
+          delay: 1
+
+        - name: Record the redirect and workspace verification in the CI log
+          ansible.builtin.debug:
+            msg: "{{ ruby_install_tls_completion.stdout }}"
+
+  always:
+    - name: Remove only the acquisition scenario's private directory
+      ansible.builtin.file:
+        path: "{{ ruby_install_tls_dir }}"
+        state: absent
+      when: ruby_install_tls_completion is defined and ruby_install_tls_completion is succeeded and ruby_install_tls_completion.finished

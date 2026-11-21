@@ -1,0 +1,24 @@
+---
+- name: Exercise one new installation with a controlled HTTPS source
+  block:
+    - name: Invoke the installation Role using the fixture's test CA
+      ansible.builtin.include_role:
+        name: ruby_install
+        apply:
+          environment:
+            SSL_CERT_FILE: "{{ ruby_install_tls_dir }}/ca.pem"
+      vars:
+        ruby_install_prefix: "{{ ruby_install_tls_dir }}/new-prefix"
+        ruby_install_workspace: "{{ ruby_install_tls_dir }}/{{ ruby_install_tls_case.name }}"
+        ruby_install_download_url: "{{ ruby_install_tls_case.url }}"
+        ruby_install_download_checksum: "{{ ruby_install_tls_case.checksum }}"
+
+    - name: Detect an unexpected installation success
+      ansible.builtin.fail:
+        msg: The controlled installation unexpectedly completed.
+  rescue:
+    - name: Confirm the Role reported this case's reason and retained workspace
+      ansible.builtin.assert:
+        that:
+          - ruby_install_tls_case.reason in ansible_failed_result.msg
+          - "('Build workspace retained at ' ~ ruby_install_tls_dir ~ '/' ~ ruby_install_tls_case.name ~ '/ruby-install-') in ansible_failed_result.msg"

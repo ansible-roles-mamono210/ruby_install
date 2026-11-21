@@ -28,6 +28,9 @@
         enablerepo: crb
         state: present
 
+    - name: Verify real acquisition stops and failure workspace retention
+      ansible.builtin.include_tasks: tasks/acquisition.yml
+
     - name: Create the private fixture directory
       ansible.builtin.file:
         path: "{{ ruby_install_fixture_dir }}"

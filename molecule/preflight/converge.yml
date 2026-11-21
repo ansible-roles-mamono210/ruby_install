@@ -31,7 +31,19 @@
             ruby_install_workspace: "{{ ruby_install_fixture.path }}/missing-workspace"
             ruby_install_test_reason: "WORKSPACE_INVALID:"
 
-        - name: Inspect the new installation path
+        - name: Confirm the fixture workspace is mounted noexec
+          ansible.builtin.command:
+            argv: [/usr/bin/python3, -c, "import os, sys; sys.exit(int(not (os.statvfs('/dev/shm').f_flag & os.ST_NOEXEC)))"]
+          changed_when: false
+
+        - name: Reject the Docker target's noexec shared-memory workspace before installation
+          ansible.builtin.include_tasks: tasks/expect_stop.yml
+          vars:
+            ruby_install_prefix: "{{ ruby_install_fixture.path }}/new"
+            ruby_install_workspace: /dev/shm
+            ruby_install_test_reason: "WORKSPACE_NOEXEC:"
+
+        - name: Inspect the new installation path after both workspace stops
           ansible.builtin.stat:
             path: "{{ ruby_install_fixture.path }}/new"
           register: ruby_install_absent

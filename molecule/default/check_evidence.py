@@ -49,6 +49,19 @@ def resources(settings, state, memory, effective):
             "memory_events": counters}
 
 
+def distribution_ruby(comparison):
+    require(isinstance(comparison, dict), "missing distribution Ruby coexistence evidence")
+    before = comparison.get("before")
+    require(isinstance(before, dict) and before == comparison.get("after"),
+            "distribution Ruby baseline missing or changed")
+    require(isinstance(before.get("path"), str) and before["path"].startswith("/usr/")
+            and isinstance(before.get("rpm"), str) and before["rpm"]
+            and isinstance(before.get("version"), str) and before["version"]
+            and all(type(before.get(key)) is int for key in ("mode", "uid", "gid"))
+            and isinstance(before.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", before["sha256"]),
+            "incomplete distribution Ruby snapshot")
+
+
 def validate(folder, condition, commit):
     require(re.fullmatch(r"(3\.4\.12|4\.0\.9)-(default|custom|rust)", condition), "unsupported condition")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "missing Git revision")
@@ -64,6 +77,8 @@ def validate(folder, condition, commit):
             "protected state changed or evidence missing")
     require(case["rust_before"] == case["rust_after"] and case["rust_before"]["installed"] is (profile == "rust"),
             "invalid compiler fixture")
+    if condition == "3.4.12-custom":
+        distribution_ruby(case.get("os_ruby"))
     return {"commit": commit, "condition": condition,
             "recaps": play_recaps((folder / "molecule.log").read_text(errors="replace")),
             "resources": resources((folder / "target-limits.txt").read_text(),

@@ -24,6 +24,14 @@
         src: /var/tmp/ruby-install-rust-before.json
       register: ruby_install_test_rust_before
 
+    - name: Compare the OS Ruby with its pre-installation snapshot
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/files/check_os_ruby.py verify"
+        executable: /usr/bin/python3
+      register: ruby_install_test_os_ruby
+      changed_when: false
+      when: ruby_install_test_condition == '3.4.12-custom'
+
     - name: Verify the actual Rust environment after the Role
       ansible.builtin.script:
         cmd: "{{ playbook_dir }}/files/check_case.py rust {{ ruby_install_test_profile }}"
@@ -74,6 +82,7 @@
           condition: "{{ ruby_install_test_condition }}"
           record: "{{ ruby_install_record.content | b64decode | from_json }}"
           runtime: "{{ ruby_install_test_runtime.stdout | from_json }}"
+          os_ruby: "{{ ruby_install_test_os_ruby.stdout | default('null') | from_json }}"
           rust_before: "{{ ruby_install_test_rust_before.content | b64decode | from_json }}"
           rust_after: "{{ ruby_install_test_rust_after.stdout | from_json }}"
           after_install: "{{ ruby_install_before.content | b64decode | from_json }}"

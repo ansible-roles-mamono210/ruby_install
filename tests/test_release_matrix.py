@@ -21,6 +21,32 @@ def recap_log():
 
 
 class ReleaseMatrix(unittest.TestCase):
+    def test_distribution_ruby_requires_complete_matching_snapshots(self):
+        before = {"path": "/usr/bin/ruby", "rpm": "ruby-3.0.7", "version": "3.0.7",
+                  "uid": 0, "gid": 0, "mode": 0o100755, "sha256": "a" * 64}
+        evidence.distribution_ruby({"before": before, "after": dict(before)})
+        for value in (None, {}, {"before": before}, {"before": before, "after": dict(before, version="3.4.12")}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                evidence.distribution_ruby(value)
+        for field in before:
+            incomplete = {k: v for k, v in before.items() if k != field}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                evidence.distribution_ruby({"before": incomplete, "after": dict(incomplete)})
+
+    def test_normal_and_release_lint_use_the_adopted_checks(self):
+        config = yaml.safe_load((ROOT / ".circleci/config.yml").read_text())
+        self.assertEqual(config["orbs"]["ansible-lint"], "orbss/ansible-lint@1.0.0")
+        image = config["parameters"]["ansible_lint_executor_image"]["default"]
+        self.assertTrue(image.endswith("@sha256:4ea7fe7ebbe7fd06bd5a7fc61b8931c3303a11c9bd4eb06431a810f5914b8718"))
+        job = config["jobs"]["ansible-lint"]
+        self.assertEqual(job["executor"]["image"], "<< pipeline.parameters.ansible_lint_executor_image >>")
+        self.assertIn({"ansible-lint/execute": {"molecule-role-test": True}}, job["steps"])
+        self.assertIn("python3 -B scripts/check_role_variable_names.py --source .",
+                      [step["run"]["command"] for step in job["steps"] if isinstance(step, dict) and "run" in step])
+        for name in ("build", "v020-release-matrix"):
+            self.assertTrue(any(isinstance(item, dict) and "ansible-lint" in item
+                                for item in config["workflows"][name]["jobs"]))
+
     def test_workflow_has_one_sequential_job_per_condition(self):
         config = yaml.safe_load((ROOT / ".circleci/config.yml").read_text())
         jobs = config["workflows"]["v020-release-matrix"]["jobs"]

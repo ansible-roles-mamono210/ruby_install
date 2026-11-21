@@ -115,9 +115,13 @@ class InstallTests(unittest.TestCase):
         self.assertTrue((self.work / "build").is_dir())
 
     def test_successful_verification_publishes_schema_once(self):
+        sibling = self.work / "previous-run.log"
+        sibling.write_bytes(b"keep this log")
         self.install_until_verify(True)
         self.assertEqual(json.loads((self.prefix / state.RECORD).read_bytes()), self.record)
         self.assertFalse((self.prefix / build.MARKER).exists())
+        self.assertTrue((self.work / "build").is_dir())
+        self.assertEqual(sibling.read_bytes(), b"keep this log")
 
     def test_work_cleanup_requires_the_same_private_directory(self):
         work = self.work / "ruby-install-aa"

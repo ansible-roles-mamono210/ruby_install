@@ -37,7 +37,7 @@ def entry_cases():
     case("empty_on", INVALID, ruby_install_symlink_commands=[], ruby_install_create_symlinks=True)
     case("links_on", "LINKS_UNAVAILABLE:", ruby_install_create_symlinks=True)
 
-    for i, value in enumerate(("3.4", "3.4.12-rc1", "4.1.0")):
+    for i, value in enumerate(("3.4", "3.4.12-rc1", "4.1.0", "", "latest", ">=3.4", 3.4)):
         case("invalid_version_" + str(i), INVALID, ruby_install_version=value)
     case("unknown_digest", INVALID, ruby_install_version="3.4.99")
     case("explicit_url_needs_digest", INVALID, ruby_install_download_url="https://example.org/ruby")
@@ -60,9 +60,23 @@ def main():
             "vars": {"ansible_connection": "ssh", "ansible_ssh_executable": "/usr/bin/false"},
             "hosts": cases,
         }}))
-        subprocess.run(["ansible-playbook", "-i", str(inventory), str(HERE / "entry.yml")],
-                       env={**os.environ, "ANSIBLE_ROLES_PATH": dirname}, check=True)
-    print(f"{len(cases)} entry cases passed")
+        command = ["ansible-playbook", "-i", str(inventory), str(HERE / "entry.yml")]
+        env = {**os.environ, "ANSIBLE_ROLES_PATH": dirname}
+        subprocess.run(command, env=env, check=True)
+
+        typed = {"ruby_install_build_jobs": 4, "ruby_install_documentation": False}
+        vars_file = root / "typed.yml"
+        vars_file.write_text("ruby_install_build_jobs: 4\nruby_install_documentation: false\n")
+        extra_cases = [
+            ("@" + str(vars_file), MISSING_FACTS),
+            (json.dumps(typed), MISSING_FACTS),
+            ("ruby_install_build_jobs=4", INVALID),
+            ("ruby_install_documentation=false", INVALID),
+        ]
+        for argument, reason in extra_cases:
+            subprocess.run(command + ["--limit", "defaults", "-e", argument,
+                                      "-e", json.dumps({"expected_reason": reason})], env=env, check=True)
+    print(f"{len(cases)} inventory and {len(extra_cases)} extra-variable entry cases passed")
 
 
 if __name__ == "__main__":

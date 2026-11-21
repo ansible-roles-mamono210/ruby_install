@@ -2,54 +2,28 @@
 
 # ruby_install
 
-A development snapshot of specifications and evaluation tooling for a
-future Ruby installation Role on CentOS Stream 9.
+This Ansible Role installs Ruby from verified source into a dedicated prefix on
+CentOS Stream 9 x86_64. The v0.2.0 candidate implements Phases 2 and 3. Gather
+target facts and run the Role with root privileges. The minimum controller
+version is ansible-core 2.21.6.
 
-**v0.2.0 development branch.** The minimum controller version for this branch
-is ansible-core 2.21.6. The Role validates native input types, supported
-versions, HTTPS sources, SHA-256 digests and dedicated paths. Gather target
-facts and run with root privileges on CentOS Stream 9 x86_64.
-A permitted new installation installs build dependencies, verifies the source,
-builds into the dedicated prefix and checks the installed Ruby before committing
-its installation record. Failed builds retain their private workspace and logs.
-An existing prefix requires a trusted installation record and matching managed
-Ruby, build settings and libraries for a successful unchanged rerun. Unrecorded
-Ruby stops before execution. Link requests stop with `LINKS_UNAVAILABLE`.
-Phase 1 evaluation results below refer to their original revisions.
+On first installation the Role verifies the downloaded source, builds Ruby and
+checks the installed commands, libraries and documentation before writing a
+record. On subsequent runs it checks the record and the managed Ruby. A healthy
+installation with the same settings returns unchanged. Use the commands in
+`<prefix>/bin` directly. Setting `ruby_install_create_symlinks: true` stops
+with `LINKS_UNAVAILABLE` in v0.2.0.
+
+CI #474 verified six installations and unchanged reruns at `d9289758`. See the
+[v0.2.0 candidate notes](docs/releases/v0.2.0.md) for the tested combinations,
+record format, migration, recovery and outstanding publication checks.
 
 ## v0.1.0 development snapshot
 
-**Specification/evaluation snapshot: the new Role contract is unimplemented.**
-CI462 passed on `2b4f9a397f3ad9e23001eee6ddcc260533aa0ad9`. See the
-[release notes](docs/releases/v0.1.0.md) for its exact scope. The published
-GitHub Pre-release identifies the approved release SHA and its verification
-record; the presence of these files alone does not establish publication.
-v0.1.0 fixes the Phase 1 specification, evaluation tooling and historical
-evidence. The included legacy Role does not implement the new contract.
-The first planned installation-capable version under that contract is v0.2.0.
-Do not run this snapshot as an implementation of the new public variables,
-verified acquisition, managed-prefix protection or idempotence requirements.
-
-- [Release notes and candidate checks](docs/releases/v0.1.0.md)
-- [Phase 1 evidence, fixed source commits and limits](docs/p1-evidence.md)
-- [Changelog](CHANGELOG.md)
-
-To inspect the specification baseline now, retrieve its full commit in a new
-directory. This command retrieves the pre-release-preparation baseline, not a
-published v0.1.0 or the final candidate:
-
-```sh
-git clone https://github.com/ansible-roles-mamono210/ruby_install.git ruby-install-spec
-cd ruby-install-spec
-git checkout --detach 55a7ebfa6c6358ea03563d9ab6741921b2be03dc
-git rev-parse HEAD
-```
-
-Candidate checks use the complete candidate SHA, record file hashes and retrieve
-that SHA independently. After publication, the tag must be compared with that
-approved SHA before using the snapshot. No `v0.1.0` tag is claimed to exist here.
-The v0.1.0 metadata omits a minimum Ansible version and supported EL platforms.
-The fixed environments below describe the Phase 1 evaluations.
+The published v0.1.0 Pre-release fixes the Phase 1 specification, tooling and
+evaluation results at `01a647d0b3612b4707781f277af2092974e11d39`. Its packaged
+Role is the legacy implementation. See the [v0.1.0 notes](docs/releases/v0.1.0.md),
+[Phase 1 evidence](docs/p1-evidence.md) and [GitHub Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.1.0).
 
 ## v1.0.0 contract
 
@@ -301,9 +275,8 @@ Inspect `<prefix>/bin/ruby`, not whichever Ruby is first on PATH. Require both a
 completed installation record inside that prefix and successful health checks of
 the actual files, version, `RbConfig` paths and required functionality. The record
 must identify the version, prefix, source SHA-256, shared-library/JIT policy and
-documentation setting. Its private filename and representation remain
-implementation choices. Finalize it only after installation and health checks
-succeed; a record alone never proves a healthy installation. Phase 2 defines
+documentation setting. The [v0.2.0 record format](docs/releases/v0.2.0.md#installation-record)
+identifies the schema written after installation and health checks succeed. Phase 2 defines
 the common record representation, validation and assembly logic; test fixtures
 use that same logic. Phase 3 writes the real prefix's completed record after
 successful installation and complete post-installation checks. Final identical
@@ -417,10 +390,10 @@ not a reading of a production `secure_path` configuration or a universal CentOS
 default. The separate non-root become check used a disposable test user and sudo
 rule; it does not establish stock non-root privileges or production become setup.
 
-### Examples for the future implementation
+### Installation example for v0.2.0
 
-These examples describe v1.0.0 inputs. Do not use them as proof that the current
-Role supports the variables or preserves the boundaries above.
+Make the Role available as `ruby_install` on the controller. This play installs
+the default Ruby with standard documentation and links disabled.
 
 ```yaml
 ---
@@ -454,7 +427,7 @@ that a new build would succeed or that downloaded bytes have been verified.
 | --- | --- | --- |
 | Role/Molecule/syntax controller | `ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41` | Python 3.14.10; core 2.21.6; Molecule/plugins 26.11.0; community.general 13.5.1; ansible.posix 2.2.2; community.docker 5.4.0 |
 | Target | `ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2` | CentOS Stream 9, x86_64, Python 3.9.19; amd64 manifest `sha256:04f9e631a4f0ba1cbf9b13c4b29d6e9f1b0f5365f661c5128c220d66d5870e92` |
-| Supplementary lint | `ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint@sha256:4ea7fe7ebbe7fd06bd5a7fc61b8931c3303a11c9bd4eb06431a810f5914b8718` | Python 3.14.3; ansible-lint 26.1.1; core 2.20.3; ansible-compat 25.12.0; ruamel.yaml 0.19.1; yamllint 1.38.0 |
+| Lint in normal and release CI | `ghcr.io/docker-images-mamono210/circleci-executors/ansible-lint@sha256:4ea7fe7ebbe7fd06bd5a7fc61b8931c3303a11c9bd4eb06431a810f5914b8718` | Python 3.14.3; ansible-lint 26.1.1; core 2.20.3; ansible-compat 25.12.0; ruamel.yaml 0.19.1; yamllint 1.38.0 |
 
 `community.general` is a Role execution dependency. Molecule, its plugins,
 `ansible.posix` for profiling and `community.docker` for Docker-based validation
@@ -470,7 +443,8 @@ lint image, whole-Role lint and the additional actual-file checker
 in a temporary `roles/ruby_install` layout using all normal rules. Empty input,
 invalid inputs and suppression-based false success must be rejected. Updating the
 Orb alone, using only `--tags var-naming`, or skipping naming rules is insufficient.
-This normal CI integration remains to be implemented.
+The normal and release workflows use the same lint job. Its two checks must
+pass on the candidate commit.
 
 The adopted normal `.yamllint` changes are
 `comments.min-spaces-from-content: 1`, `comments-indentation: disable`,
@@ -530,6 +504,12 @@ with the pre-run snapshot. The specified build workspace must stay absent.
 The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
 has a 20-minute timeout. Ordinary CI runs the default Molecule installation
 condition for Ruby 3.4.12 with documentation enabled.
+
+The preflight scenarios also exercise a noexec workspace, HTTPS redirects,
+a checksum mismatch and retention of a failed configure log. The Ruby 3.4.12
+custom-prefix matrix row compares the distribution Ruby before and after the
+Role. The first matrix row retrieves the candidate by full SHA into a new
+directory and runs the Role from that checkout.
 
 For a final candidate, run a pipeline on its branch with the boolean parameter
 `run_v020_release_matrix=true` and the other probe flags at their defaults.
@@ -611,20 +591,16 @@ Role default-version change compatible, since it can stop an existing prefix.
 Phase 1's technical completion was adopted in r51 (contract v10 / Roadmap v11).
 The r55 decisions (contract v11 / Roadmap v12) supplement that specification;
 this README incorporates them without reclassifying evaluation as Role proof.
-Phase 2/3 implementation and real Role validation remain outstanding.
+CI #474 exercised the Phase 2/3 implementation at
+`d928975859613bf58c6c41571da47f33ccef50a9`. The six real Role conditions passed.
+The [candidate notes](docs/releases/v0.2.0.md) identify the remaining release checks.
 
 Before each publication, align that release's implementation claims, metadata,
 examples, CHANGELOG, tests and release notes; verify the candidate's fixed-ref
 distribution and then retrieval of the published tag in a separate directory.
-P1-06 requires human confirmation of copyright ownership and code provenance,
-and a finalized LICENSE before the first v0.1.0 publication, including a tag-only
-publication. The holder confirmed the existing code was self-written; this
-candidate includes the BSD-3-Clause LICENSE with the confirmed holder and year.
-This completes the candidate's license preparation, not its release validation.
-The v0.1.0 check configuration and CI462 evidence are described in the release
-notes. A final candidate must have its own verification record before publication;
-CI462 is evidence for its recorded SHA, not for every later documentation commit.
-None of the evaluation evidence alone establishes release readiness.
+The v0.1.0 release completed P1-06 with the BSD-3-Clause license, the confirmed
+holder and the initial commit year. Historical checks stay attributed to their
+recorded revisions. Each new candidate has its own verification record.
 
 ## Earlier implementation snapshot
 
@@ -657,5 +633,4 @@ The holder confirmed that the existing code was self-written and selected the
 initial-commit year for this notice. The repository's root commit is
 [`83777ecb4b1daf1f033020ac65321d2d48701b90`](https://github.com/ansible-roles-mamono210/ruby_install/commit/83777ecb4b1daf1f033020ac65321d2d48701b90),
 dated 2021-03-26. The LICENSE and metadata now use the same identifier, replacing
-the earlier ambiguous labels. This license does not imply completion of the
-new Role contract or publication of v0.1.0.
+the earlier ambiguous labels.

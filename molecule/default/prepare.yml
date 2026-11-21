@@ -19,12 +19,32 @@
         - "{{ ruby_install_test_prefix }}"
         - /var/tmp/ruby-install-default-baseline.json
         - /var/tmp/ruby-install-rust-before.json
+        - /var/tmp/ruby-install-os-ruby.json
         - /var/tmp/ruby-install-case.json
       register: ruby_install_test_paths
 
     - name: Require a fresh target for this installation
       ansible.builtin.assert:
         that: ruby_install_test_paths.results | selectattr('stat.exists') | list | length == 0
+
+    - name: Prepare the OS Ruby for the 3.4.12 custom-prefix coexistence check
+      when: ruby_install_test_condition == '3.4.12-custom'
+      block:
+        - name: Require the disposable Docker target before installing the OS Ruby
+          ansible.builtin.assert:
+            that: ansible_connection in ['docker', 'community.docker.docker']
+
+        - name: Install the distribution Ruby on this disposable target
+          ansible.builtin.dnf:
+            name: ruby
+            state: present
+            install_weak_deps: false
+
+        - name: Record the RPM-owned Ruby before running the Role
+          ansible.builtin.script:
+            cmd: "{{ playbook_dir }}/files/check_os_ruby.py save"
+            executable: /usr/bin/python3
+          changed_when: true
 
     - name: Check for the fixture compiler
       ansible.builtin.stat:

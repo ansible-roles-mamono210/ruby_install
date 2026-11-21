@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — v0.2.0 development
+## Unreleased — v0.2.0 candidate
 
 - Replace the four legacy defaults with ten public inputs. Reject the five
   documented legacy names when visible, including null values.
@@ -16,6 +16,9 @@
 - Check the managed Ruby and required libraries on recorded reruns, and look
   for remaining public links when publication is disabled. Link creation is
   scheduled for v0.3.0.
+- Verified six real installations across Ruby 3.4.12 and 4.0.9 at `d9289758`.
+  The [candidate notes](docs/releases/v0.2.0.md) give the evidence, schema-1
+  installation record and manual recovery steps.
 
 ## v0.1.0 — specification and evaluation snapshot
 
