@@ -1,0 +1,66 @@
+---
+- name: Resolve the requested packages with CRB disabled
+  block:
+    - name: Check the base repository transaction
+      ansible.builtin.dnf:
+        name: "{{ ruby_install_required_packages }}"
+        state: present
+        disablerepo: crb
+      check_mode: true
+      changed_when: false
+      register: ruby_install_base_plan
+  rescue:
+    - name: Only use CRB for package resolution failures
+      ansible.builtin.assert:
+        that: >-
+          (ruby_install_base_plan.msg | default('')).startswith('Depsolve Error') or
+          (ruby_install_base_plan.msg | default('') == 'Failed to install some of the specified packages' and
+           ruby_install_base_plan.failures | default([]) | select('match', '^No package .* available\.$') | list | length > 0)
+        fail_msg: "DEPENDENCY_CHECK_FAILED: unable to check the base repositories."
+
+    - name: Verify the complete transaction can be resolved with CRB
+      ansible.builtin.dnf:
+        name: "{{ ruby_install_required_packages }}"
+        state: present
+        enablerepo: crb
+      check_mode: true
+      changed_when: false
+
+    - name: Read the current CRB configuration
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -c
+          - "import dnf; b = dnf.Base(); b.read_all_repos(); print(int(b.repos['crb'].enabled))"
+      register: ruby_install_crb
+      changed_when: false
+      failed_when: ruby_install_crb.rc != 0 or ruby_install_crb.stdout not in ['0', '1']
+
+    - name: Enable CRB for the required development packages
+      when: ruby_install_crb.stdout == '0'
+      block:
+        - name: Check whether the DNF configuration command is already available
+          ansible.builtin.command:
+            argv: [/usr/bin/dnf, config-manager, --help]
+          register: ruby_install_config_manager
+          changed_when: false
+          failed_when: false
+
+        - name: Ensure the DNF configuration command is available
+          ansible.builtin.dnf:
+            name: dnf-plugins-core
+            state: present
+            enablerepo: crb
+          when: ruby_install_config_manager.rc != 0
+
+        - name: Persist the CRB setting
+          ansible.builtin.command:
+            argv: [/usr/bin/dnf, config-manager, --set-enabled, crb]
+          changed_when: true
+
+- name: Install the required packages using the verified repositories
+  ansible.builtin.dnf:
+    name: "{{ ruby_install_required_packages }}"
+    state: present
+    disablerepo: "{{ omit if ruby_install_base_plan is failed else 'crb' }}"

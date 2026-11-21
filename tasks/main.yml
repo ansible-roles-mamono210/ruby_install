@@ -31,7 +31,8 @@
         documentation: "{{ ruby_install_documentation }}"
       register: ruby_install_inspection
 
-    - name: Stop at the new installation boundary
-      ansible.builtin.fail:
-        msg: "INSTALLATION_PENDING: preflight allows new installation. The build stage is pending."
-      when: ruby_install_inspection.state == 'new_install_allowed'
+    - name: Install Ruby on a new target
+      ansible.builtin.include_tasks: install.yml
+      when:
+        - ruby_install_inspection.state == 'new_install_allowed'
+        - not ruby_install_inspection.check_mode

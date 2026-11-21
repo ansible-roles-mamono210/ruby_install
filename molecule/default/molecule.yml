@@ -4,9 +4,12 @@ dependency:
 driver:
   name: docker
 platforms:
-  - name: instance
+  - name: ruby-install-default
     image: ${MOLECULE_IMAGE}
     pre_build_image: true
+    cpus: 1
+    memory: 2G
+    memory_swap: 2G
 provisioner:
   name: ansible
   config_options:
@@ -20,5 +23,8 @@ scenario:
     - syntax
     - create
     - converge
+    - side_effect
+    - check
     - idempotence
     - verify
+    - destroy

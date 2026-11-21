@@ -12,13 +12,24 @@
 
     - name: Observe the Role entry and protected filesystem state
       block:
-        - name: Exercise the absent prefix in normal and check mode
-          ansible.builtin.include_tasks: tasks/expect_stop.yml
-          loop: [false, true]
+        - name: Exercise the absent prefix in check mode
+          ansible.builtin.include_role:
+            name: ruby_install
+            apply:
+              check_mode: true
           vars:
-            ruby_install_test_check_mode: "{{ item }}"
             ruby_install_prefix: "{{ ruby_install_fixture.path }}/new"
-            ruby_install_test_reason: "INSTALLATION_PENDING:"
+
+        - name: Confirm the candidate passed read-only inspection
+          ansible.builtin.assert:
+            that: ruby_install_inspection.state == 'new_install_allowed'
+
+        - name: Exercise the absent prefix with an unavailable workspace in normal mode
+          ansible.builtin.include_tasks: tasks/expect_stop.yml
+          vars:
+            ruby_install_prefix: "{{ ruby_install_fixture.path }}/new"
+            ruby_install_workspace: "{{ ruby_install_fixture.path }}/missing-workspace"
+            ruby_install_test_reason: "WORKSPACE_INVALID:"
 
         - name: Inspect the new installation path
           ansible.builtin.stat:

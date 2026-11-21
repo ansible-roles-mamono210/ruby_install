@@ -7,8 +7,12 @@
 - Check native types, positive build parallelism and the selected command
   list. Resolve the version, HTTPS source, SHA-256 and absolute paths.
 - Inspect existing prefixes and records without modifying them. Only new
-  candidates require the build workspace and space allowance. They stop with
-  `INSTALLATION_PENDING` while the build stage is in development.
+  candidates require the build workspace and space allowance.
+- Resolve build dependencies and enable CRB when required. Download, verify
+  and validate the Ruby archive, build and install it in a dedicated prefix,
+  then verify all nine commands, native libraries and the documentation setting.
+- Publish a completed installation record only after the checks pass. Remove
+  the current successful workspace by default and retain diagnostics on failure.
 - Check the managed Ruby and required libraries on recorded reruns, and look
   for remaining public links when publication is disabled. Link creation is
   scheduled for v0.3.0.

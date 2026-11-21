@@ -9,8 +9,9 @@ future Ruby installation Role on CentOS Stream 9.
 is ansible-core 2.21.6. The Role validates native input types, supported
 versions, HTTPS sources, SHA-256 digests and dedicated paths. Gather target
 facts and run with root privileges on CentOS Stream 9 x86_64.
-A new installation candidate stops with `INSTALLATION_PENDING` after the
-workspace, capacity and residual-link checks. The build stage is in development.
+A permitted new installation installs build dependencies, verifies the source,
+builds into the dedicated prefix and checks the installed Ruby before committing
+its installation record. Failed builds retain their private workspace and logs.
 An existing prefix requires a trusted installation record and matching managed
 Ruby, build settings and libraries for a successful unchanged rerun. Unrecorded
 Ruby stops before execution. Link requests stop with `LINKS_UNAVAILABLE`.
@@ -180,11 +181,9 @@ decision. The adopted Phase 3 acquisition route is:
 
 The `uri` → `stat` → `assert` route passed the bounded evaluation described below;
 its selection was adopted in contract section 15 and supplemented in section 16.
-Production Role integration remains unimplemented. The evaluation's
-fixture gate marker is not an installation record and must not replace archive
-validation or production installation checks. Archive validation remains a
-Phase 3 implementation responsibility. No `follow_redirects` option is passed
-to `get_url`.
+The Role uses this sequence before validating and extracting archive members
+in its private workspace. It writes the completed installation record only after
+the managed Ruby, commands, libraries and documentation pass verification.
 
 Checksum or structure failure must prevent extraction, build and Ruby
 installation. This is not rollback of earlier dependency installation or CRB
@@ -520,8 +519,8 @@ requirements, not names of existing Molecule scenarios or CI jobs:
 On the v0.2.0 feature branch, the `preflight` CI job uses the pinned controller
 and target images. It runs target Python unit tests, controller-only entry
 cases and the `molecule/preflight` scenario through the normal Role entry.
-The first scenario checks an absent prefix in normal and check mode and
-confirms that an unmanaged Ruby is preserved without execution. When pushed to
+The first scenario checks an absent prefix in check mode, rejects an unavailable
+workspace in normal mode and preserves an unmanaged Ruby without executing it. When pushed to
 `feature/v0.2.0-install`, the same job also runs `molecule/preflight-healthy`. Its fixture
 builds the official Ruby 3.4.12 tar.gz with documentation disabled and creates
 a test record from the installed Ruby and verified source digest.
@@ -529,10 +528,11 @@ Converge, check mode and idempotence each require `installed_healthy` and
 compare the prefix, public commands, installed packages and repository files
 with the pre-run snapshot. The specified build workspace must stay absent.
 The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
-has a 20-minute timeout. The final rerun using a record written during a
-Role installation requires the Phase 3 writer. Interim
-preflight-only tests do not replace the normal four CI categories required by
-v0.2.0 and later. A workflow that did not run is not a passing test.
+has a 20-minute timeout. The default Molecule scenario installs Ruby 3.4.12
+with standard documentation, reads its Role-generated record, runs check mode
+and idempotence, and compares the prefix, public commands, RPM inventory and
+repository files with their post-installation snapshots. CI keeps the test log
+and captures available build diagnostics before removing its containers.
 
 The initial full-Role test planning basis is target CPU1, memory limit 2 GiB,
 no additional swap, make jobs 1, one condition at a time and no automatic retries.

@@ -1,8 +1,13 @@
 ---
-- name: Converge
+- name: Install the default Ruby and verify rerun decisions
   hosts: all
   become: true
-  vars:
-    ansible_user: ansible
   roles:
     - ruby_install
+  post_tasks:
+    - name: Require a verified installation or a healthy unchanged rerun
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ruby_install_inspection.state == 'new_install_allowed' and ruby_install_build_result is defined and
+             ruby_install_build_result is changed) or ruby_install_inspection.state == 'installed_healthy'

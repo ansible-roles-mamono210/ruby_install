@@ -1,0 +1,111 @@
+---
+- name: Create a private directory for this installation
+  ansible.builtin.tempfile:
+    path: "{{ ruby_install_resolved.workspace }}"
+    state: directory
+    prefix: ruby-install-
+  register: ruby_install_work
+
+- name: Install the verified source into the permitted prefix
+  vars:
+    ruby_install_required_packages:
+      - gcc
+      - make
+      - tar
+      - gzip
+      - ca-certificates
+      - openssl-devel
+      - libyaml-devel
+      - zlib-devel
+      - libffi-devel
+  block:
+    - name: Identify this run's private directory
+      ansible.builtin.stat:
+        path: "{{ ruby_install_work.path }}"
+        follow: false
+        get_checksum: false
+        get_attributes: false
+        get_mime: false
+      register: ruby_install_work_stat
+
+    - name: Obtain the installed RPM names
+      ansible.builtin.package_facts:
+        manager: rpm
+
+    - name: Install missing build dependencies
+      ansible.builtin.include_tasks: dependencies.yml
+      when: ruby_install_required_packages | difference(ansible_facts.packages.keys() | list) | length > 0
+
+    - name: Recheck paths, residual links and capacity after dependencies
+      ruby_install_inspect:
+        version: "{{ ruby_install_version }}"
+        prefix: "{{ ruby_install_resolved.prefix }}"
+        workspace: "{{ ruby_install_resolved.workspace }}"
+        digest: "{{ ruby_install_resolved.sha256 }}"
+        documentation: "{{ ruby_install_documentation }}"
+      register: ruby_install_after_dependencies
+
+    - name: Require the prefix to remain available before download
+      ansible.builtin.assert:
+        that: ruby_install_after_dependencies.state == 'new_install_allowed'
+        fail_msg: Installation state changed during dependency preparation.
+
+    - name: Download the source directly over verified HTTPS
+      ansible.builtin.uri:
+        url: "{{ ruby_install_resolved.url }}"
+        dest: "{{ ruby_install_work.path }}/source.tar.gz"
+        method: GET
+        status_code: [200]
+        follow_redirects: none
+        validate_certs: true
+        use_proxy: false
+        use_netrc: false
+        decompress: false
+        return_content: false
+        timeout: 60
+        mode: "0600"
+      no_log: true
+
+    - name: Read the SHA-256 of the downloaded file
+      ansible.builtin.stat:
+        path: "{{ ruby_install_work.path }}/source.tar.gz"
+        follow: false
+        get_checksum: true
+        checksum_algorithm: sha256
+        get_attributes: false
+        get_mime: false
+      register: ruby_install_archive
+
+    - name: Require a regular file with the expected SHA-256
+      ansible.builtin.assert:
+        that:
+          - ruby_install_archive.stat.isreg | default(false)
+          - not (ruby_install_archive.stat.islnk | default(true))
+          - ruby_install_archive.stat.checksum == ruby_install_resolved.sha256
+        fail_msg: "SOURCE_CHECKSUM_MISMATCH: the downloaded file did not match the requested SHA-256."
+
+    - name: Build Ruby, verify the installation and publish its record
+      ruby_install_build:
+        version: "{{ ruby_install_version }}"
+        prefix: "{{ ruby_install_resolved.prefix }}"
+        workspace: "{{ ruby_install_resolved.workspace }}"
+        work: "{{ ruby_install_work.path }}"
+        work_dev: "{{ ruby_install_work_stat.stat.dev }}"
+        work_inode: "{{ ruby_install_work_stat.stat.inode }}"
+        digest: "{{ ruby_install_resolved.sha256 }}"
+        documentation: "{{ ruby_install_documentation }}"
+        jobs: "{{ ruby_install_build_jobs }}"
+        keep: "{{ ruby_install_keep_build_workspace }}"
+      register: ruby_install_build_result
+
+    - name: Report the retained build workspace
+      ansible.builtin.debug:
+        msg: "Build workspace retained at {{ ruby_install_build_result.workspace }}"
+      when: ruby_install_keep_build_workspace
+  rescue:
+    - name: Report the failure stage and retained diagnostics
+      ansible.builtin.fail:
+        msg: >-
+          {{ ansible_failed_result.stage | default(ansible_failed_task.name) }} failed.
+          {{ ansible_failed_result.msg if ansible_failed_task.action in ['ruby_install_build', 'ruby_install_inspect', 'ansible.builtin.assert'] else '' }}
+          Build workspace retained at {{ ruby_install_work.path }}.

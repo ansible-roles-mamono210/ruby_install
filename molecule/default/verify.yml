@@ -1,24 +1,58 @@
 ---
-- name: Verify
+- name: Verify the Role-generated record and unchanged installation
   hosts: all
+  gather_facts: false
   become: true
-
   tasks:
-    - name: Check whether ruby is installed
-      ansible.builtin.shell: |
-        ruby --version
-      register: ruby_installed
+    - name: Read the completed installation record
+      ansible.builtin.slurp:
+        src: /opt/ruby/.ruby-install-state.json
+      register: ruby_install_record
+
+    - name: Read the actual managed Ruby identity
+      ansible.builtin.command:
+        argv:
+          - /opt/ruby/bin/ruby
+          - --disable=gems,rubyopt
+          - -rrbconfig
+          - -e
+          - 'puts RUBY_VERSION, File.realpath(RbConfig.ruby), RbConfig::CONFIG.fetch("prefix")'
+      register: ruby_install_identity
       changed_when: false
 
-    - name: Make sure Ruby is installed
-      ansible.builtin.debug:
-        var: ruby_installed
+    - name: Read the snapshot from the first installation
+      ansible.builtin.slurp:
+        src: /var/tmp/ruby-install-default-baseline.json
+      register: ruby_install_before
 
-    - name: Check OS version
-      ansible.builtin.command: cat /etc/redhat-release
-      register: os_version
+    - name: Read the target state after check mode and idempotence
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../shared/snapshot.py /opt/ruby"
+        executable: /usr/bin/python3
+      register: ruby_install_after
       changed_when: false
 
-    - name: Show OS version
-      ansible.builtin.debug:
-        var: os_version
+    - name: Look for retained workspaces on the disposable target
+      ansible.builtin.find:
+        paths: /tmp
+        file_type: directory
+        patterns: ruby-install-*
+      register: ruby_install_workspaces
+
+    - name: Require the default contract and identical protected state
+      vars:
+        ruby_install_expected_record:
+          schema_version: 1
+          state: complete
+          ruby_version: "3.4.12"
+          canonical_prefix: /opt/ruby
+          source_sha256: 5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479
+          shared: true
+          jit: {yjit: false, rjit: false}
+          documentation: true
+      ansible.builtin.assert:
+        that:
+          - (ruby_install_record.content | b64decode | from_json) == ruby_install_expected_record
+          - ruby_install_identity.stdout_lines == ['3.4.12', '/opt/ruby/bin/ruby', '/opt/ruby']
+          - (ruby_install_before.content | b64decode | from_json) == (ruby_install_after.stdout | from_json)
+          - ruby_install_workspaces.matched == 0

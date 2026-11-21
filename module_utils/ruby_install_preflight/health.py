@@ -99,12 +99,12 @@ STDOUT.write("features")
 '''
 
 
-def bounded_output(argv, timeout=12, limit=64 * 1024):
+def bounded_output(argv, timeout=12, limit=64 * 1024, env=None):
     deadline = time.monotonic() + timeout
     error = "HEALTH_CHECK_FAILED: Ruby probe failed, timed out or exceeded its output limit"
     try:
         with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": "/"}, cwd="/",
+                              env=env if env is not None else {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": "/"}, cwd="/",
                               start_new_session=True) as process:
             try:
                 output = bytearray()

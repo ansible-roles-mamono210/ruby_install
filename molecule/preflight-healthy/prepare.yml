@@ -41,6 +41,7 @@
         mode: "0600"
       loop:
         - "{{ playbook_dir }}/files/healthy_fixture.py"
+        - "{{ playbook_dir }}/../shared/snapshot.py"
         - "{{ playbook_dir }}/../../scripts/p1/source_container_probe.py"
         - "{{ playbook_dir }}/../../scripts/p1/build_container_probe.py"
         - "{{ playbook_dir }}/../../module_utils/ruby_install_preflight/state.py"

@@ -47,6 +47,10 @@ state:
   description: Either new_install_allowed or installed_healthy.
   returned: success
   type: str
+check_mode:
+  description: Effective check mode of this task.
+  returned: success
+  type: bool
 '''
 import os
 import re
@@ -75,7 +79,7 @@ def main():
     except Stop as exc:
         module.fail_json(changed=False, msg=str(exc))
     else:
-        module.exit_json(changed=False, state=result)
+        module.exit_json(changed=False, state=result, check_mode=module.check_mode)
 
 
 if __name__ == "__main__":

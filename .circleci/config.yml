@@ -28,7 +28,7 @@ parameters:
     default: small
   molecule_docker_executor_image:
     type: string
-    default: ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker:26.2.0-py3.14-ans13.4.0
+    default: ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
   molecule_machine_executor_image:
     type: string
     default: ubuntu-2204:2023.10.1
@@ -200,7 +200,7 @@ jobs:
                   cd << parameters.checkout-path >>
                   docker run --rm --entrypoint /usr/bin/python3 \
                     -v "$PWD":/role:ro -w /role << parameters.molecule-test-image >> \
-                    -B -m unittest discover -s tests -p test_role_preflight.py
+                    -B -m unittest discover -s tests -p 'test_role_*flight.py'
                   docker run --rm --entrypoint python3 \
                     -v "$PWD":/tmp/ruby_install:ro -w /tmp/ruby_install << parameters.molecule-docker-executor-image >> \
                     -B tests/preflight/run.py
@@ -213,6 +213,10 @@ jobs:
 
             cd << parameters.checkout-path >>
 
+            if [[ "<< parameters.molecule-scenario-name >>" == default ]]; then
+              bash molecule/default/run-ci.sh << parameters.molecule-docker-executor-image >> << parameters.molecule-test-image >>
+              exit
+            fi
             scenarios=("<< parameters.molecule-scenario-name >>")
             if [[ "<< parameters.molecule-scenario-name >>" == preflight ]]; then
               scenarios+=(preflight-healthy)
@@ -228,6 +232,13 @@ jobs:
                 << parameters.molecule-docker-executor-image >> \
                 molecule test --scenario-name "$scenario"
             done
+      - when:
+          condition:
+            equal: [default, << parameters.molecule-scenario-name >>]
+          steps:
+            - store_artifacts:
+                path: ~/ruby-install-default-evidence
+                destination: ruby-install-default
       - run:
           name: Show Ansible version
           command: |
@@ -309,6 +320,7 @@ workflows:
             branches:
               only: feature/v0.2.0-install
       - molecule:
+          molecule-no-output-timeout: 22m
           matrix:
             parameters:
               checkout-path:
@@ -318,7 +330,7 @@ workflows:
               molecule-scenario-name:
                 - 'default'
               molecule-test-image:
-                - 'ghcr.io/docker-images-mamono210/ansible-test/centos-stream9:latest'
+                - 'ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2'
           requires:
             - ansible-lint
   v010-release-checks:
