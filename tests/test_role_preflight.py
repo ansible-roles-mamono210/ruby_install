@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "filter_plugins"))
 sys.path.insert(0, str(ROOT / "module_utils"))
 import ruby_install_inputs as inputs
-from ruby_install_preflight import health, state
+from ruby_install_preflight import health, links, state
 
 
 class Inputs(unittest.TestCase):
@@ -81,7 +81,7 @@ class Observations(unittest.TestCase):
         self.nobody = set()
         self.sep_fs = False
         self.observed_times = {}
-        orig_lstat, orig_fstat = state.lstat, os.fstat
+        orig_lstat, orig_fstat, orig_stat = state.lstat, os.fstat, os.stat
         ancestors = set(self.root.parents)
         def attrs(s, path=None):
             if s is None:
@@ -93,7 +93,11 @@ class Observations(unittest.TestCase):
             return SimpleNamespace(st_mode=mode, st_dev=s.st_dev + int(self.sep_fs and path == self.work),
                                    st_uid=1000 if path in self.nobody else 0, st_gid=0,
                                    st_ino=s.st_ino, st_size=s.st_size, st_mtime_ns=mtime, st_ctime_ns=ctime)
+        def mapped_stat(path, **kwargs):
+            result = orig_stat(path, **kwargs)
+            return attrs(result) if kwargs.get("dir_fd") is not None else result
         for hook in (patch.object(state, "lstat", side_effect=lambda path: attrs(orig_lstat(path), path)),
+                     patch.object(os, "stat", side_effect=mapped_stat),
                      patch.object(os, "fstat", side_effect=lambda fd: attrs(orig_fstat(fd)))):
             hook.start()
             self.addCleanup(hook.stop)
@@ -266,6 +270,115 @@ class Observations(unittest.TestCase):
         (self.public / "ruby").symlink_to(self.prefix / "bin" / "ruby")
         self.stopped("RESIDUAL_LINK")
         self.assertFalse(self.prefix.exists())
+
+    def link_plan(self, commands):
+        self.req["link_commands"] = commands
+        status, plan = state.inspect_with_links(self.req, self.probe, self.public)
+        self.assertEqual(status, "installed_healthy")
+        return plan
+
+    def test_published_v020_records_from_all_six_target_runs(self):
+        cases = json.loads((ROOT / "tests/fixtures/v020_install_records.json").read_text())["cases"]
+        self.assertEqual({case["job"] for case in cases}, set(range(1711, 1717)))
+        record_file = self.root / state.RECORD
+        for case in cases:
+            version, profile = case["condition"].split("-")
+            with self.subTest(job=case["job"], condition=case["condition"]):
+                record_file.write_text(json.dumps(case["record"]) + "\n")
+                self.assertEqual(state.read_record(record_file, state.lstat(record_file)),
+                                 state.installation_record(version, "/opt/ruby-custom" if profile == "custom" else "/opt/ruby",
+                                                           inputs.CHECKSUMS[version], True, state.jit_settings(version),
+                                                           profile != "custom"))
+
+    def test_new_install_with_links_checks_destinations_before_build(self):
+        self.req["link_commands"] = ["ruby", "gem"]
+        self.assertEqual(self.inspect(), "new_install_allowed")
+        self.assertFalse(self.prefix.exists())
+        dest = self.public / "gem"
+        dest.write_text("keep this command")
+        self.stopped("LINK_CONFLICT")
+        self.assertEqual(dest.read_text(), "keep this command")
+        self.assertFalse((self.public / "ruby").exists())
+        self.assertFalse(self.prefix.exists())
+
+    def test_plan_reuses_a_correct_relative_link_and_second_run_is_unchanged(self):
+        ruby = self.binary()
+        self.record()
+        gem = ruby.with_name("gem")
+        gem.write_text("fixture")
+        gem.chmod(0o755)
+        public_gem = self.public / "gem"
+        public_gem.symlink_to(os.path.relpath(gem, self.public))
+        original = public_gem.lstat()
+        preview = self.link_plan(["gem", "ruby"])
+        self.assertEqual(preview.missing, ("ruby",))
+        self.assertFalse((self.public / "ruby").is_symlink())
+        self.assertEqual(links.create_links(preview), ["ruby"])
+        self.assertEqual((self.public / "ruby").resolve(), ruby)
+        self.assertEqual(links.create_links(self.link_plan(["ruby", "gem"])), [])
+        self.assertEqual(state.identity(original), state.identity(public_gem.lstat()))
+        self.req["link_commands"] = ["ruby"]
+        self.stopped("RESIDUAL_LINK")
+        self.req["link_commands"] = []
+        self.stopped("RESIDUAL_LINK")
+        self.assertTrue(public_gem.is_symlink())
+
+    def test_all_selected_sources_are_verified_before_any_publication(self):
+        ruby = self.binary()
+        self.record()
+        gem = ruby.with_name("gem")
+        self.req["link_commands"] = ["ruby", "gem"]
+        self.stopped("LINK_SOURCE_INVALID")
+        gem.write_text("test executable")
+        for mode in (0o644, 0o777):
+            gem.chmod(mode)
+            self.stopped("LINK_SOURCE_INVALID")
+        gem.unlink()
+        external = self.work / "external"
+        external.touch(mode=0o755)
+        gem.symlink_to(external)
+        self.stopped("LINK_SOURCE_INVALID")
+        self.assertEqual(list(self.public.iterdir()), [])
+
+    def test_occupied_wrong_and_broken_selected_destinations_are_preserved(self):
+        ruby = self.binary()
+        self.record()
+        self.req["link_commands"] = ["ruby"]
+        dest = self.public / "ruby"
+        dest.write_text("local program")
+        self.stopped("LINK_CONFLICT")
+        self.assertEqual(dest.read_text(), "local program")
+        dest.unlink()
+        other = ruby.with_name("gem")
+        other.touch(mode=0o755)
+        for target in (other, self.work / "missing"):
+            dest.symlink_to(target)
+            self.stopped("LINK_CONFLICT")
+            self.assertEqual(os.readlink(dest), str(target))
+            dest.unlink()
+
+    def test_publish_rechecks_sources_and_reports_partial_creation(self):
+        ruby = self.binary()
+        self.record()
+        ruby.with_name("gem").touch(mode=0o755)
+        plan = self.link_plan(["ruby", "gem"])
+        ruby.chmod(0o644)
+        with self.assertRaises(links.LinkCreationError) as caught:
+            links.create_links(plan)
+        self.assertEqual((caught.exception.created, caught.exception.not_created), ([], ["ruby", "gem"]))
+        self.assertEqual(list(self.public.iterdir()), [])
+        ruby.chmod(0o755)
+        plan = self.link_plan(["ruby", "gem"])
+        real_symlink = os.symlink
+        def add_link(source, name, **kwargs):
+            if name == "gem":
+                (self.public / name).write_text("new occupant")
+            return real_symlink(source, name, **kwargs)
+        with patch.object(os, "symlink", side_effect=add_link), self.assertRaises(links.LinkCreationError) as caught:
+            links.create_links(plan)
+        self.assertEqual((caught.exception.created, caught.exception.not_created), (["ruby"], ["gem"]))
+        self.assertEqual((self.public / "ruby").resolve(), ruby)
+        self.assertEqual((self.public / "gem").read_text(), "new occupant")
 
     def test_identity_change_during_health(self):
         binary = self.binary()

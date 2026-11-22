@@ -1,0 +1,110 @@
+---
+- name: Compare the installed schema with the matching v0.2.0 CI record
+  vars:
+    ruby_install_test_v020: "{{ lookup('ansible.builtin.file', playbook_dir + '/../../tests/fixtures/v020_install_records.json') | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - ruby_install_test_v020.commit == '6b1cd945c5a0d3472c7f1dfe565852db37097596'
+      - >-
+        (ruby_install_record.content | b64decode | from_json) ==
+        (ruby_install_test_v020.cases | selectattr('condition', 'equalto', ruby_install_test_condition) | first).record
+
+- name: Snapshot each public name before publication
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/../shared/snapshot.py {{ ruby_install_test_prefix }} ruby gem bundle bundler irb erb rdoc ri rake"
+    executable: /usr/bin/python3
+  changed_when: false
+  register: ruby_install_test_before_links
+
+- name: Verify opt-in publication on the healthy recorded installation
+  vars:
+    ruby_install_create_symlinks: true
+    ruby_install_symlink_commands: "{{ ruby_install_test_initial_links + ['ruby', 'gem'] }}"
+  block:
+    - name: Preview the missing links
+      ansible.builtin.include_role:
+        name: ruby_install
+        apply:
+          check_mode: true
+
+    - name: Require both planned links and no created links in check mode
+      ansible.builtin.assert:
+        that:
+          - ruby_install_inspection.state == 'installed_healthy'
+          - ruby_install_publication is changed
+          - ruby_install_publication.would_create == ['ruby', 'gem']
+          - ruby_install_publication.created == []
+
+    - name: Publish the two selected commands
+      ansible.builtin.include_role:
+        name: ruby_install
+
+    - name: Require exactly the previewed changes
+      ansible.builtin.assert:
+        that:
+          - ruby_install_inspection.state == 'installed_healthy'
+          - ruby_install_publication is changed
+          - ruby_install_publication.created == ['ruby', 'gem']
+
+    - name: Save the link identities immediately after creation
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../shared/snapshot.py {{ ruby_install_test_prefix }} ruby gem bundle bundler irb erb rdoc ri rake"
+        executable: /usr/bin/python3
+      changed_when: false
+      register: ruby_install_test_new_links
+
+    - name: Repeat publication on the same installation
+      ansible.builtin.include_role:
+        name: ruby_install
+
+    - name: Require the Role to reuse both links
+      ansible.builtin.assert:
+        that:
+          - ruby_install_publication is not changed
+          - ruby_install_publication.created == []
+
+- name: Check list reduction and disabling with managed links present
+  ansible.builtin.include_tasks: verify_residual.yml
+  loop:
+    - {enabled: true, commands: [ruby]}
+    - {enabled: false, commands: []}
+  loop_control:
+    loop_var: ruby_install_test_selection
+
+- name: Read the final state of the nine public commands
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/../shared/snapshot.py {{ ruby_install_test_prefix }} ruby gem bundle bundler irb erb rdoc ri rake"
+    executable: /usr/bin/python3
+  changed_when: false
+  register: ruby_install_test_after_links
+
+- name: Resolve the two public commands
+  ansible.builtin.command:
+    argv: [/usr/bin/readlink, -e, /usr/local/bin/ruby, /usr/local/bin/gem]
+  changed_when: false
+  register: ruby_install_test_targets
+
+- name: Resolve the commands published during the first installation
+  ansible.builtin.command:
+    argv: [/usr/bin/readlink, -e, "/usr/local/bin/{{ item }}"]
+  loop: "{{ ruby_install_test_initial_links }}"
+  register: ruby_install_test_first_targets
+  changed_when: false
+  failed_when: ruby_install_test_first_targets.stdout != ruby_install_test_prefix + '/bin/' + item
+
+- name: Save the observed publication evidence
+  ansible.builtin.set_fact:
+    ruby_install_test_link_result:
+      before: "{{ ruby_install_test_before_links.stdout | from_json }}"
+      created: "{{ ruby_install_test_new_links.stdout | from_json }}"
+      after: "{{ ruby_install_test_after_links.stdout | from_json }}"
+      targets: "{{ ruby_install_test_targets.stdout_lines }}"
+
+- name: Require stable installation data and the expected public commands
+  ansible.builtin.assert:
+    that:
+      - ruby_install_test_link_result.targets == [ruby_install_test_prefix + '/bin/ruby', ruby_install_test_prefix + '/bin/gem']
+      - ruby_install_test_link_result.created == ruby_install_test_link_result.after
+      - ruby_install_test_link_result.before.prefix == ruby_install_test_link_result.after.prefix
+      - ruby_install_test_link_result.before.repository_files == ruby_install_test_link_result.after.repository_files
+      - ruby_install_test_link_result.before.installed_packages == ruby_install_test_link_result.after.installed_packages

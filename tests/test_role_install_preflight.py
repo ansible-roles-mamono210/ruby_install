@@ -92,7 +92,7 @@ class InstallTests(unittest.TestCase):
         request = dict(version=self.version, prefix=str(self.prefix), digest="a" * 64,
                        documentation=True, jobs=1, keep=True)
         # Exercise real marker, locking and hard-link publication in an unprivileged temporary prefix.
-        def verify(prefix, record, env):
+        def verify(prefix, record, env, link_commands):
             self.assertFalse((prefix / state.RECORD).exists())
             self.assertTrue((prefix / build.MARKER).is_file())
             self.assertEqual(record, self.record)

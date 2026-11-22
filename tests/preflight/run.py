@@ -35,7 +35,7 @@ def entry_cases():
         case("bad_commands_" + str(i), INVALID, ruby_install_symlink_commands=value)
     case("empty_off", MISSING_FACTS, ruby_install_symlink_commands=[], ruby_install_build_jobs=4)
     case("empty_on", INVALID, ruby_install_symlink_commands=[], ruby_install_create_symlinks=True)
-    case("links_on", "LINKS_UNAVAILABLE:", ruby_install_create_symlinks=True)
+    case("links_on", MISSING_FACTS, ruby_install_create_symlinks=True)
 
     for i, value in enumerate(("3.4", "3.4.12-rc1", "4.1.0", "", "latest", ">=3.4", 3.4)):
         case("invalid_version_" + str(i), INVALID, ruby_install_version=value)

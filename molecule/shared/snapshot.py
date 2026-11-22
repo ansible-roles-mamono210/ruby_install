@@ -54,4 +54,4 @@ def snapshot(prefix, commands=None):
 
 
 if __name__ == "__main__":
-    print(json.dumps(snapshot(Path(sys.argv[1])), sort_keys=True))
+    print(json.dumps(snapshot(Path(sys.argv[1]), sys.argv[2:] or None), sort_keys=True))

@@ -19,8 +19,18 @@
       ansible.builtin.stat:
         path: /var/tmp/ruby-install-default-baseline.json
       register: ruby_install_test_baseline
-  roles:
-    - ruby_install
+
+    - name: Exercise opt-in publication during one fresh installation and both reruns
+      ansible.builtin.set_fact:
+        ruby_install_create_symlinks: true
+        ruby_install_symlink_commands: "{{ ruby_install_test_initial_links }}"
+      when: ruby_install_test_initial_links | length > 0
+  tasks:
+    - name: Install with the selected Role and run all later checks with the candidate
+      ansible.builtin.include_role:
+        name: >-
+          {{ 'ruby_install_v020' if lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_FROM_V020') == '1'
+          and not ruby_install_test_baseline.stat.exists else 'ruby_install' }}
   post_tasks:
     - name: Require a new installation on the first run and a healthy recorded Ruby on reruns
       ansible.builtin.assert:
@@ -31,3 +41,10 @@
           - >-
             (ruby_install_build_result is defined and ruby_install_build_result is changed) ==
             (not ruby_install_test_baseline.stat.exists and not ansible_check_mode)
+
+    - name: Require first-run publication and identical reruns for the opt-in condition
+      ansible.builtin.assert:
+        that:
+          - ruby_install_publication.created == ([] if ruby_install_test_baseline.stat.exists else ruby_install_test_initial_links)
+          - (ruby_install_publication is changed) == (not ruby_install_test_baseline.stat.exists)
+      when: ruby_install_test_initial_links | length > 0

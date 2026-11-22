@@ -40,7 +40,7 @@ def vacant_prefix(request, work):
         trusted_dir(info)
         if any(prefix.iterdir()):
             raise Stop("INSTALLATION_INCOMPLETE: installation destination became occupied")
-    check_publication(obs, prefix, "/usr/local/bin")
+    check_publication(obs, prefix, "/usr/local/bin", request.get("link_commands", ()))
     obs.recheck()
     return prefix
 
@@ -94,7 +94,7 @@ STDOUT.write([RbConfig::CONFIG.fetch("ruby_version"), RDoc::RI::Paths.system_dir
 """
 
 
-def verify_installation(prefix, record, env):
+def verify_installation(prefix, record, env, link_commands=()):
     obs = Observation()
     ruby = prefix / "bin" / "ruby"
     for name in COMMANDS:
@@ -134,7 +134,7 @@ def verify_installation(prefix, record, env):
         trusted_dir(info)
         if any(docs.rglob("*.ri")):
             raise Stop("HEALTH_CHECK_FAILED: standard documentation was installed with documentation disabled")
-    check_publication(obs, prefix, "/usr/local/bin")
+    check_publication(obs, prefix, "/usr/local/bin", link_commands, installed=True)
     obs.recheck()
 
 
@@ -170,7 +170,8 @@ def install(request, progress):
         run_logged("install", ["/usr/bin/make", "-j1", "install"], work / "build", work, env)
         progress["stage"] = "verify"
         record = installation_record(version, prefix, request["digest"], True, jit_settings(version), request["documentation"])
-        verify_installation(prefix, record, dict(env, PATH=str(prefix / "bin") + ":/usr/bin:/bin"))
+        verify_installation(prefix, record, dict(env, PATH=str(prefix / "bin") + ":/usr/bin:/bin"),
+                            request.get("link_commands", ()))
         progress["stage"] = "record"
         publish(prefix, directory, marker, record)
     progress["stage"] = "cleanup"

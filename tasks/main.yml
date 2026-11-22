@@ -29,6 +29,7 @@
         workspace: "{{ ruby_install_resolved.workspace }}"
         digest: "{{ ruby_install_resolved.sha256 }}"
         documentation: "{{ ruby_install_documentation }}"
+        link_commands: "{{ ruby_install_symlink_commands if ruby_install_create_symlinks else [] }}"
       register: ruby_install_inspection
 
     - name: Install Ruby on a new target
@@ -36,3 +37,16 @@
       when:
         - ruby_install_inspection.state == 'new_install_allowed'
         - not ruby_install_inspection.check_mode
+
+    - name: Publish the selected commands from the verified installation
+      ruby_install_links:
+        version: "{{ ruby_install_version }}"
+        prefix: "{{ ruby_install_resolved.prefix }}"
+        workspace: "{{ ruby_install_resolved.workspace }}"
+        digest: "{{ ruby_install_resolved.sha256 }}"
+        documentation: "{{ ruby_install_documentation }}"
+        link_commands: "{{ ruby_install_symlink_commands }}"
+      register: ruby_install_publication
+      when:
+        - ruby_install_create_symlinks
+        - ruby_install_inspection.state == 'installed_healthy' or not ruby_install_inspection.check_mode

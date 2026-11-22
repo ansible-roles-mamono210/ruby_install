@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased — v0.2.0 candidate
+## Unreleased — v0.3.0
+
+- Publish selected Ruby commands under `/usr/local/bin` when enabled. The
+  default remains off. A healthy v0.2.0 installation can add links without
+  rebuilding Ruby or rewriting its schema-1 record.
+- Check all selected sources and destinations before creating links. Reuse
+  matching links and report the created and outstanding names on a partial
+  failure. Disabling links or reducing the list detects remaining links.
+- The normal CI installation starts from the pinned v0.2.0 tag. The six release
+  conditions install the candidate and compare its records with the published
+  v0.2.0 observations. The Ruby 4.0.9 Rust-present condition also publishes
+  commands during the first installation, then adds two more on a healthy rerun.
+
+## v0.2.0 — 2026-11-22
 
 - Replace the four legacy defaults with ten public inputs. Reject the five
   documented legacy names when visible, including null values.
@@ -17,8 +30,9 @@
   for remaining public links when publication is disabled. Link creation is
   scheduled for v0.3.0.
 - Verified six real installations across Ruby 3.4.12 and 4.0.9 at `d9289758`.
-  The [candidate notes](docs/releases/v0.2.0.md) give the evidence, schema-1
-  installation record and manual recovery steps.
+  The [published Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.2.0)
+  identifies the final commit and CI #477 and #478. The [release notes](docs/releases/v0.2.0.md)
+  give the schema-1 installation record and manual recovery steps.
 
 ## v0.1.0 — specification and evaluation snapshot
 

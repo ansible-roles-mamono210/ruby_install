@@ -1,0 +1,17 @@
+---
+- name: Require an explicit stop with the existing public links preserved
+  block:
+    - name: Request a reduced list or disable publication
+      ansible.builtin.include_role:
+        name: ruby_install
+      vars:
+        ruby_install_create_symlinks: "{{ ruby_install_test_selection.enabled }}"
+        ruby_install_symlink_commands: "{{ ruby_install_test_selection.commands }}"
+
+    - name: Fail when the Role accepts outstanding links
+      ansible.builtin.fail:
+        msg: The Role accepted a managed public link outside the requested selection.
+  rescue:
+    - name: Check that the residual-link stop caused the failure
+      ansible.builtin.assert:
+        that: "'RESIDUAL_LINK:' in ansible_failed_result.msg"

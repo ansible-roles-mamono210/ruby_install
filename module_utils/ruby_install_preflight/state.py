@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+from typing import NamedTuple
 
 
 RECORD = ".ruby-install-state.json"
@@ -207,14 +208,49 @@ def new_workspace(obs, workspace, prefix, existing):
         raise Stop("WORKSPACE_INVALID: unable to verify workspace or filesystem capacity") from exc
 
 
-def check_publication(obs, prefix, public_bin):
+class LinkPlan(NamedTuple):
+    observation: Observation
+    prefix: Path
+    directory: Path
+    missing: tuple
+
+
+def selected_source(obs, prefix, name):
+    path = prefix / "bin" / name
+    resolved, info, _ = obs.resolve(path, missing=True, allow_dangling=True)
+    if (prefix not in resolved.parents or not trusted_file(info) or not info.st_mode & 0o111
+            or not os.access(resolved, os.X_OK, effective_ids=True)):
+        raise Stop("LINK_SOURCE_INVALID: expected a trusted executable in the managed prefix for " + name)
+    return resolved
+
+
+def check_publication(obs, prefix, public_bin, commands=(), *, installed=False):
+    if (not isinstance(commands, (list, tuple)) or any(name not in COMMANDS for name in commands)
+            or len(set(commands)) != len(commands)):
+        raise Stop("INVALID_INPUT: invalid command selection for link publication")
     directory, info, _ = obs.resolve(public_bin, missing=True)
     if info is None:
-        return
+        if commands:
+            raise Stop("LINK_DESTINATION_INVALID: the public bin directory is missing")
+        return LinkPlan(obs, prefix, directory, ())
     trusted_dir(info)
+    missing = []
     for name in COMMANDS:
         path = directory / name
         item = obs.stat(path)
+        if name in commands:
+            if overlaps(path, prefix):
+                raise Stop("LINK_CONFLICT: the public destination overlaps the prefix for " + name)
+            source = selected_source(obs, prefix, name) if installed else None
+            if item is None:
+                missing.append(name)
+                continue
+            if source is None or not stat.S_ISLNK(item.st_mode):
+                raise Stop("LINK_CONFLICT: public destination already exists for " + name)
+            target, target_info, _ = obs.resolve(path, missing=True, allow_dangling=True)
+            if target_info is None or target != source:
+                raise Stop("LINK_CONFLICT: public link does not resolve to the selected command for " + name)
+            continue
         if item is None or not stat.S_ISLNK(item.st_mode):
             continue
         try:
@@ -225,9 +261,15 @@ def check_publication(obs, prefix, public_bin):
             raise Stop("RESIDUAL_LINK: remove the public link to this prefix for " + name)
         if target_info is None:
             raise Stop("LINK_STATE_UNCERTAIN: public command target is missing for " + name)
+    return LinkPlan(obs, prefix, directory, tuple(name for name in commands if name in missing))
 
 
 def inspect(request, health_check, public_bin="/usr/local/bin"):
+    state, _ = inspect_with_links(request, health_check, public_bin)
+    return state
+
+
+def inspect_with_links(request, health_check, public_bin="/usr/local/bin"):
     obs = Observation()
     try:
         prefix, info, existing = obs.resolve(request["prefix"], missing=True, follow_final=False)
@@ -270,13 +312,13 @@ def inspect(request, health_check, public_bin="/usr/local/bin"):
             obs.recheck()
             health_check(obs, prefix, record)
             state = "installed_healthy"
-        check_publication(obs, prefix, public_bin)
+        plan = check_publication(obs, prefix, public_bin, request.get("link_commands", ()), installed=not empty)
         obs.recheck()
         if empty and info is not None:
             with os.scandir(prefix) as entries:
                 if next(entries, None) is not None:
                     raise Stop("UNSAFE_PATH: the empty prefix changed during inspection")
-        return state
+        return state, plan
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise Stop("UNSAFE_PATH: symlink loop during inspection") from exc

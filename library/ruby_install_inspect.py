@@ -30,6 +30,11 @@ options:
     description: Expected native boolean documentation setting.
     type: raw
     required: true
+  link_commands:
+    description: Selected public command names. An empty list checks for residual links.
+    type: list
+    elements: str
+    default: []
 author:
   - mamono210
 '''
@@ -60,8 +65,9 @@ from ansible.module_utils.basic import AnsibleModule
 
 def main():
     fields = ("version", "prefix", "workspace", "digest", "documentation")
-    module = AnsibleModule(argument_spec={key: {"type": "raw", "required": True} for key in fields},
-                           supports_check_mode=True)
+    options = {key: {"type": "raw", "required": True} for key in fields}
+    options["link_commands"] = {"type": "list", "elements": "str", "default": []}
+    module = AnsibleModule(argument_spec=options, supports_check_mode=True)
     from ansible.module_utils.ruby_install_preflight.health import health_check
     from ansible.module_utils.ruby_install_preflight.state import Stop, inspect, overlaps
 

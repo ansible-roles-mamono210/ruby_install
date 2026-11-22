@@ -3,20 +3,21 @@
 # ruby_install
 
 This Ansible Role installs Ruby from verified source into a dedicated prefix on
-CentOS Stream 9 x86_64. The v0.2.0 candidate implements Phases 2 and 3. Gather
+CentOS Stream 9 x86_64. The v0.3.0 development branch adds optional command links
+to the installation and rerun checks published in v0.2.0. Gather
 target facts and run the Role with root privileges. The minimum controller
 version is ansible-core 2.21.6.
 
 On first installation the Role verifies the downloaded source, builds Ruby and
 checks the installed commands, libraries and documentation before writing a
 record. On subsequent runs it checks the record and the managed Ruby. A healthy
-installation with the same settings returns unchanged. Use the commands in
-`<prefix>/bin` directly. Setting `ruby_install_create_symlinks: true` stops
-with `LINKS_UNAVAILABLE` in v0.2.0.
+installation with matching settings and links returns unchanged. By default, use
+the commands in `<prefix>/bin` directly. To publish selected commands, enable
+`ruby_install_create_symlinks` and set `ruby_install_symlink_commands`.
 
-CI #474 verified six installations and unchanged reruns at `d9289758`. See the
-[v0.2.0 candidate notes](docs/releases/v0.2.0.md) for the tested combinations,
-record format, migration, recovery and outstanding publication checks.
+The [v0.2.0 Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.2.0)
+identifies the six published installation conditions and their CI results. See the
+[v0.2.0 notes](docs/releases/v0.2.0.md) for its record format, migration and recovery.
 
 ## v0.1.0 development snapshot
 
@@ -351,6 +352,21 @@ commands to `/usr/local/bin/<command>`, resolving to the corresponding healthy
 `<prefix>/bin/<command>`. Inspect all selected sources/destinations before creating
 any link. Do not install additional gems to conceal a missing command.
 
+For example, these Role variables publish Ruby and RubyGems on an existing
+healthy v0.2.0 installation, or after a new installation completes.
+
+```yaml
+ruby_install_create_symlinks: true
+ruby_install_symlink_commands: [ruby, gem]
+```
+
+Use `/usr/local/bin/ruby` and `/usr/local/bin/gem` to invoke the published
+commands. On a healthy prefix, check mode lists missing names in `would_create`.
+On a new prefix it checks destinations and defers source checks until Ruby exists.
+A normal run creates the missing links in the requested order. If publication
+stops midway, inspect the reported `created` and `not_created` names and
+resolve the conflict before rerunning.
+
 | Setting/state | Required behavior |
 | --- | --- |
 | Links disabled and no applicable existing publication | Leave link publication paths unchanged; a permitted new install may still install dependencies or enable CRB |
@@ -360,7 +376,7 @@ any link. Do not install additional gems to conceal a missing command.
 | Selected source missing or non-executable | Stop before creating links |
 | Enabled → disabled with links to this prefix remaining | Stop and request manual removal |
 | Command list reduced with removed commands still published | Stop and request manual removal |
-| Creation fails or a conflict appears partway | Stop and report created/not-created links; no automatic rollback |
+| Creation fails or a conflict appears partway | Leave created links in place and report the created and outstanding names for manual inspection |
 
 For disabled/reduced lists, inspect the nine allowed public names and their
 resolved targets. Do not rely only on an installation record's list or infer who
@@ -490,20 +506,23 @@ requirements, not names of existing Molecule scenarios or CI jobs:
 | T12–T14 | Owned-workspace success/failure handling, fixed-ref Role distribution, cleanup of test containers with required failure evidence retained |
 | T15 | The five rejected old names, including externally visible definitions; wrong types, invalid versions, checksum/URL errors, command-list errors and unsafe paths; workspace environment failures for new installs and healthy-rerun controls that skip those checks |
 
-On the v0.2.0 feature branch, the `preflight` CI job uses the pinned controller
+On the installation and link-publication feature branches, the `preflight` CI job uses the pinned controller
 and target images. It runs target Python unit tests, controller-only entry
 cases and the `molecule/preflight` scenario through the normal Role entry.
 The first scenario checks an absent prefix in check mode, rejects an unavailable
-workspace in normal mode and preserves an unmanaged Ruby without executing it. When pushed to
-`feature/v0.2.0-install`, the same job also runs `molecule/preflight-healthy`. Its fixture
+workspace in normal mode and preserves an unmanaged Ruby without executing it.
+The same job also runs `molecule/preflight-healthy`. Its fixture
 builds the official Ruby 3.4.12 tar.gz with documentation disabled and creates
 a test record from the installed Ruby and verified source digest.
 Converge, check mode and idempotence each require `installed_healthy` and
 compare the prefix, public commands, installed packages and repository files
 with the pre-run snapshot. The specified build workspace must stay absent.
 The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
-has a 20-minute timeout. Ordinary CI runs the default Molecule installation
-condition for Ruby 3.4.12 with documentation enabled.
+has a 20-minute timeout. Ordinary CI installs Ruby 3.4.12 with documentation
+using the published v0.2.0 Role, then exercises the candidate on that prefix.
+The six-condition workflow installs the candidate. Its Ruby 4.0.9 Rust-present
+condition publishes `bundle` and `rake` during installation. All six conditions
+preview, add and reuse `ruby` and `gem` on the recorded installation.
 
 The preflight scenarios also exercise a noexec workspace, HTTPS redirects,
 a checksum mismatch and retention of a failed configure log. The Ruby 3.4.12

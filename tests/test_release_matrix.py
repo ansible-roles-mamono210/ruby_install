@@ -21,6 +21,27 @@ def recap_log():
 
 
 class ReleaseMatrix(unittest.TestCase):
+    def test_publication_requires_only_two_new_links_and_stable_reruns(self):
+        names = ("ruby", "gem", "bundle", "bundler", "irb", "erb", "rdoc", "ri", "rake")
+        old = {name: None for name in names}
+        before = dict(prefix="1" * 64, installed_packages="2" * 64, repository_files="3" * 64, public_commands=old)
+        after = dict(before, public_commands=dict(old, ruby="a" * 64, gem="b" * 64))
+        result = dict(before=before, created=after, after=after, targets=["/opt/ruby/bin/ruby", "/opt/ruby/bin/gem"])
+        evidence.publication(result, "/opt/ruby")
+        with self.assertRaises(ValueError):
+            evidence.publication(result, "/opt/ruby", ("bundle", "rake"))
+        initial = dict(old, bundle="c" * 64, rake="d" * 64)
+        preexisting = dict(after, public_commands=dict(initial, ruby="a" * 64, gem="b" * 64))
+        evidence.publication(dict(result, before=dict(before, public_commands=initial), created=preexisting,
+                                  after=preexisting), "/opt/ruby", ("bundle", "rake"))
+        for change in (dict(prefix="4" * 64), dict(public_commands=dict(after["public_commands"], irb="c" * 64))):
+            wrong = dict(after, **change)
+            with self.assertRaises(ValueError):
+                evidence.publication(dict(result, created=wrong, after=wrong), "/opt/ruby")
+        for wrong in (dict(result, created=before), dict(result, targets=["/usr/bin/ruby", "/usr/bin/gem"])):
+            with self.assertRaises(ValueError):
+                evidence.publication(wrong, "/opt/ruby")
+
     def test_distribution_ruby_requires_complete_matching_snapshots(self):
         before = {"path": "/usr/bin/ruby", "rpm": "ruby-3.0.7", "version": "3.0.7",
                   "uid": 0, "gid": 0, "mode": 0o100755, "sha256": "a" * 64}

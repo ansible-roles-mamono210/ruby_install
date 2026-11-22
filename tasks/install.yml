@@ -43,6 +43,7 @@
         workspace: "{{ ruby_install_resolved.workspace }}"
         digest: "{{ ruby_install_resolved.sha256 }}"
         documentation: "{{ ruby_install_documentation }}"
+        link_commands: "{{ ruby_install_symlink_commands if ruby_install_create_symlinks else [] }}"
       register: ruby_install_after_dependencies
 
     - name: Require the prefix to remain available before download
@@ -96,6 +97,7 @@
         documentation: "{{ ruby_install_documentation }}"
         jobs: "{{ ruby_install_build_jobs }}"
         keep: "{{ ruby_install_keep_build_workspace }}"
+        link_commands: "{{ ruby_install_symlink_commands if ruby_install_create_symlinks else [] }}"
       register: ruby_install_build_result
 
     - name: Report the retained build workspace

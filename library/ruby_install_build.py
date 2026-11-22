@@ -49,6 +49,11 @@ options:
     description: Retain the private directory after success.
     type: bool
     required: true
+  link_commands:
+    description: Selected destinations to check during a new installation.
+    type: list
+    elements: str
+    default: []
 author:
   - mamono210
 '''
@@ -74,7 +79,9 @@ def main():
     types = {"version": "str", "prefix": "path", "workspace": "path", "work": "path",
              "work_dev": "int", "work_inode": "int", "digest": "str", "documentation": "bool",
              "jobs": "int", "keep": "bool"}
-    module = AnsibleModule(argument_spec={k: {"type": v, "required": True} for k, v in types.items()})
+    options = {k: {"type": v, "required": True} for k, v in types.items()}
+    options["link_commands"] = {"type": "list", "elements": "str", "default": []}
+    module = AnsibleModule(argument_spec=options)
     from ansible.module_utils.ruby_install_preflight.build import install
     from ansible.module_utils.ruby_install_preflight.state import Stop
     p = module.params

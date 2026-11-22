@@ -263,7 +263,7 @@ jobs:
             cd << parameters.checkout-path >>
 
             if [[ "<< parameters.molecule-scenario-name >>" == default ]]; then
-              bash molecule/default/run-ci.sh << parameters.molecule-docker-executor-image >> << parameters.molecule-test-image >>
+              bash molecule/default/run-ci.sh << parameters.molecule-docker-executor-image >> << parameters.molecule-test-image >> 3.4.12-default --from-v020
               exit
             fi
             scenarios=("<< parameters.molecule-scenario-name >>")
@@ -370,7 +370,7 @@ workflows:
             - ansible-lint
           filters:
             branches:
-              only: feature/v0.2.0-install
+              only: [feature/v0.2.0-install, feature/v0.3.0-links]
       - molecule:
           molecule-no-output-timeout: 22m
           matrix:

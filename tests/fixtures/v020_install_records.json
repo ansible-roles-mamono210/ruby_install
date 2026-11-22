@@ -1,0 +1,109 @@
+{
+  "tag": "v0.2.0",
+  "commit": "6b1cd945c5a0d3472c7f1dfe565852db37097596",
+  "workflow": "https://app.circleci.com/pipelines/github/ansible-roles-mamono210/ruby_install/478/workflows/4af9fa5a-4bcd-4b42-ad3c-f3f130d46dc4",
+  "cases": [
+    {
+      "condition": "3.4.12-default",
+      "job": 1711,
+      "record": {
+        "canonical_prefix": "/opt/ruby",
+        "documentation": true,
+        "jit": {
+          "rjit": false,
+          "yjit": false
+        },
+        "ruby_version": "3.4.12",
+        "schema_version": 1,
+        "shared": true,
+        "source_sha256": "5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479",
+        "state": "complete"
+      }
+    },
+    {
+      "condition": "3.4.12-custom",
+      "job": 1712,
+      "record": {
+        "canonical_prefix": "/opt/ruby-custom",
+        "documentation": false,
+        "jit": {
+          "rjit": false,
+          "yjit": false
+        },
+        "ruby_version": "3.4.12",
+        "schema_version": 1,
+        "shared": true,
+        "source_sha256": "5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479",
+        "state": "complete"
+      }
+    },
+    {
+      "condition": "3.4.12-rust",
+      "job": 1713,
+      "record": {
+        "canonical_prefix": "/opt/ruby",
+        "documentation": true,
+        "jit": {
+          "rjit": false,
+          "yjit": false
+        },
+        "ruby_version": "3.4.12",
+        "schema_version": 1,
+        "shared": true,
+        "source_sha256": "5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479",
+        "state": "complete"
+      }
+    },
+    {
+      "condition": "4.0.9-default",
+      "job": 1714,
+      "record": {
+        "canonical_prefix": "/opt/ruby",
+        "documentation": true,
+        "jit": {
+          "yjit": false,
+          "zjit": false
+        },
+        "ruby_version": "4.0.9",
+        "schema_version": 1,
+        "shared": true,
+        "source_sha256": "c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511",
+        "state": "complete"
+      }
+    },
+    {
+      "condition": "4.0.9-custom",
+      "job": 1715,
+      "record": {
+        "canonical_prefix": "/opt/ruby-custom",
+        "documentation": false,
+        "jit": {
+          "yjit": false,
+          "zjit": false
+        },
+        "ruby_version": "4.0.9",
+        "schema_version": 1,
+        "shared": true,
+        "source_sha256": "c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511",
+        "state": "complete"
+      }
+    },
+    {
+      "condition": "4.0.9-rust",
+      "job": 1716,
+      "record": {
+        "canonical_prefix": "/opt/ruby",
+        "documentation": true,
+        "jit": {
+          "yjit": false,
+          "zjit": false
+        },
+        "ruby_version": "4.0.9",
+        "schema_version": 1,
+        "shared": true,
+        "source_sha256": "c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511",
+        "state": "complete"
+      }
+    }
+  ]
+}

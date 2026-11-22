@@ -62,7 +62,28 @@ def distribution_ruby(comparison):
             "incomplete distribution Ruby snapshot")
 
 
-def validate(folder, condition, commit):
+def publication(value, prefix, initial_links=()):
+    require(isinstance(value, dict), "missing publication evidence")
+    before, created, after = (value.get(key) for key in ("before", "created", "after"))
+    require(isinstance(before, dict) and isinstance(after, dict) and created == after, "link rerun changed state")
+    protected = {"prefix", "installed_packages", "repository_files"}
+    require(set(before) == set(after) == protected | {"public_commands"}, "incomplete publication snapshots")
+    for key in protected:
+        require(isinstance(before[key], str) and re.fullmatch(r"[0-9a-f]{64}", before[key]) and before[key] == after[key],
+                "publication changed protected state: " + key)
+    old, new = before["public_commands"], after["public_commands"]
+    names = {"ruby", "gem", "bundle", "bundler", "irb", "erb", "rdoc", "ri", "rake"}
+    require(isinstance(old, dict) and isinstance(new, dict) and set(old) == set(new) == names, "missing public names")
+    require({name for name in names if old[name] != new[name]} == {"ruby", "gem"}, "unexpected public changes")
+    for name in initial_links:
+        require(isinstance(old[name], str) and re.fullmatch(r"[0-9a-f]{64}", old[name]), "missing first-run link: " + name)
+    for name in ("ruby", "gem"):
+        require(old[name] is None and isinstance(new[name], str) and re.fullmatch(r"[0-9a-f]{64}", new[name]),
+                "selected link did not change from absent to present")
+    require(value.get("targets") == [prefix + "/bin/ruby", prefix + "/bin/gem"], "wrong public link targets")
+
+
+def validate(folder, condition, commit, *, installer_role=None):
     require(re.fullmatch(r"(3\.4\.12|4\.0\.9)-(default|custom|rust)", condition), "unsupported condition")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "missing Git revision")
     case = json.loads((folder / "case.json").read_text())
@@ -79,11 +100,23 @@ def validate(folder, condition, commit):
             "invalid compiler fixture")
     if condition == "3.4.12-custom":
         distribution_ruby(case.get("os_ruby"))
-    return {"commit": commit, "condition": condition,
-            "recaps": play_recaps((folder / "molecule.log").read_text(errors="replace")),
-            "resources": resources((folder / "target-limits.txt").read_text(),
-                                   json.loads((folder / "target-state.json").read_text()),
-                                   (folder / "memory.txt").read_text(), (folder / "cgroup-limits.txt").read_text())}
+    result = {"commit": commit, "condition": condition,
+              "recaps": play_recaps((folder / "molecule.log").read_text(errors="replace")),
+              "resources": resources((folder / "target-limits.txt").read_text(),
+                                     json.loads((folder / "target-state.json").read_text()),
+                                     (folder / "memory.txt").read_text(), (folder / "cgroup-limits.txt").read_text())}
+    installer = folder / "installer-commit.txt"
+    if installer_role or installer.exists() or "publication" in case or "installation_role" in case:
+        require(installer.is_file(), "missing installer revision")
+        installer_sha = installer.read_text().strip()
+        original = "6b1cd945c5a0d3472c7f1dfe565852db37097596"
+        observed_role = case.get("installation_role")
+        expected = {"v0.2.0": original, "candidate": commit}
+        require(observed_role in expected and installer_sha == expected[observed_role], "unexpected installer revision")
+        require(installer_role is None or installer_role == observed_role, "unexpected installer role")
+        publication(case.get("publication"), prefix, ("bundle", "rake") if condition == "4.0.9-rust" else ())
+        result["installer_commit"] = installer_sha
+    return result
 
 
 if __name__ == "__main__":
@@ -91,6 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("folder", type=Path)
     parser.add_argument("condition")
     parser.add_argument("commit")
+    parser.add_argument("--installer", choices=("v0.2.0", "candidate"), help="require publication with this installer")
     args = parser.parse_args()
-    result = validate(args.folder, args.condition, args.commit)
+    result = validate(args.folder, args.condition, args.commit, installer_role=args.installer)
     (args.folder / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

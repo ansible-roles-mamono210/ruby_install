@@ -1,7 +1,7 @@
 ---
 - name: Verify the Role-generated record and unchanged installation
   hosts: all
-  gather_facts: false
+  gather_facts: true
   become: true
   vars_files: [vars/main.yml]
   tasks:
@@ -76,6 +76,14 @@
           - (ruby_install_test_rust_before.content | b64decode | from_json) == (ruby_install_test_rust_after.stdout | from_json)
           - ruby_install_workspaces.matched == 0
 
+    - name: Check link publication against the recorded v0.2.0 condition
+      ansible.builtin.include_tasks: tasks/verify_links.yml
+      vars:
+        ruby_install_version: "{{ ruby_install_test_version }}"
+        ruby_install_prefix: "{{ ruby_install_test_prefix }}"
+        ruby_install_documentation: "{{ ruby_install_test_docs }}"
+        ruby_install_workspace: /var/tmp/ruby-install-link-test-unused
+
     - name: Save this condition's observations for the CI artifacts
       vars:
         ruby_install_test_result:
@@ -88,6 +96,8 @@
           after_install: "{{ ruby_install_before.content | b64decode | from_json }}"
           after_reruns: "{{ ruby_install_after.stdout | from_json }}"
           workspaces_after_reruns: "{{ ruby_install_workspaces.matched }}"
+          installation_role: "{{ 'v0.2.0' if lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_FROM_V020') == '1' else 'candidate' }}"
+          publication: "{{ ruby_install_test_link_result }}"
       ansible.builtin.copy:
         dest: /var/tmp/ruby-install-case.json
         content: "{{ ruby_install_test_result | to_nice_json }}\n"
