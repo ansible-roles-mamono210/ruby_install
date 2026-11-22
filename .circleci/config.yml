@@ -135,11 +135,16 @@ jobs:
             sudo chmod 666 /var/run/docker.sock
             cd ruby_install
             if [[ "<< parameters.condition >>" == 3.4.12-default ]]; then
-              release_source=$(mktemp -d)
-              trap 'rm -rf -- "$release_source"' EXIT
-              git init -q "$release_source"
-              git -C "$release_source" fetch -q --no-tags --depth 1 "$(git remote get-url origin)" "$CIRCLE_SHA1"
-              git -C "$release_source" checkout -q --detach FETCH_HEAD
+              release_tmp=$(mktemp -d)
+              trap 'rm -rf -- "$release_tmp"' EXIT
+              # Bind only the readable checkout into the non-root Molecule controller.
+              release_source="$release_tmp/ruby_install"
+              (
+                umask 022
+                git init -q "$release_source"
+                git -C "$release_source" fetch -q --no-tags --depth 1 "$(git remote get-url origin)" "$CIRCLE_SHA1"
+                git -C "$release_source" checkout -q --detach FETCH_HEAD
+              )
               cd "$release_source"
             fi
             bash molecule/default/run-ci.sh "$MATRIX_CONTROLLER" "$MATRIX_TARGET" "<< parameters.condition >>"
