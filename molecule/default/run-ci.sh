@@ -8,6 +8,20 @@ case "$condition" in
   3.4.12-default|3.4.12-custom|3.4.12-rust|4.0.9-default|4.0.9-custom|4.0.9-rust) ;;
   *) echo "Unsupported condition: $condition" >&2; exit 2 ;;
 esac
+case "${4:-candidate}" in
+  candidate) installer_role=candidate ;;
+  --from-v020|v0.2.0)
+    installer_role=v0.2.0
+    baseline_name=ruby_install_v020
+    baseline_sha=6b1cd945c5a0d3472c7f1dfe565852db37097596
+    ;;
+  v0.3.0)
+    installer_role=v0.3.0
+    baseline_name=ruby_install_v030
+    baseline_sha=0002dea544bfd6d52b4f0aaa94a4eff5aec54bd5
+    ;;
+  *) echo "Unsupported installer: $4" >&2; exit 2 ;;
+esac
 commit=$(git rev-parse HEAD)
 test "$commit" = "${CIRCLE_SHA1:?}"
 evidence="$HOME/ruby-install-default-evidence"
@@ -18,7 +32,6 @@ printf '%s\n' "$commit" > "$evidence/installer-commit.txt"
 started=$SECONDS
 baseline_root=""
 baseline_args=()
-installer_role=candidate
 existing=$(docker container ls -a --format '{{.Names}}')
 for name in "$target" "$controller"; do
   if grep -Fxq "$name" <<<"$existing"; then
@@ -83,22 +96,22 @@ finish() {
   exit "$status"
 }
 trap finish EXIT
-if [[ ${4:-} == --from-v020 ]]; then
-  installer_role=v0.2.0
+if [[ "$installer_role" != candidate ]]; then
   baseline_root=$(mktemp -d)
-  baseline="$baseline_root/ruby_install_v020"
+  baseline="$baseline_root/$baseline_name"
   (
     umask 022
     git init -q "$baseline"
-    git -C "$baseline" fetch -q --no-tags --depth 1 "$(git remote get-url origin)" refs/tags/v0.2.0
+    git -C "$baseline" fetch -q --no-tags --depth 1 "$(git remote get-url origin)" "refs/tags/$installer_role"
     git -C "$baseline" checkout -q --detach FETCH_HEAD
-    test "$(git -C "$baseline" rev-parse HEAD)" = 6b1cd945c5a0d3472c7f1dfe565852db37097596
+    test "$(git -C "$baseline" rev-parse HEAD)" = "$baseline_sha"
   )
   git -C "$baseline" rev-parse HEAD > "$evidence/installer-commit.txt"
-  baseline_args=(-v "$baseline:/tmp/ruby_install_v020:ro" -e RUBY_INSTALL_TEST_FROM_V020=1)
+  baseline_args=(-v "$baseline:/tmp/$baseline_name:ro")
 fi
 timeout --signal=TERM --kill-after=20s 20m docker run --name "$controller" \
   "${baseline_args[@]}" \
+  -e "RUBY_INSTALL_TEST_INSTALLER=$installer_role" \
   -e "MOLECULE_IMAGE=$2" -e "RUBY_INSTALL_MATRIX_CASE=$condition" -v "$PWD":/tmp/ruby_install:ro -w /tmp/ruby_install \
   -v /usr/bin/docker:/usr/bin/docker -v /var/run/docker.sock:/var/run/docker.sock \
   "$1" molecule test --destroy=never --scenario-name default 2>&1 | tee "$evidence/molecule.log"

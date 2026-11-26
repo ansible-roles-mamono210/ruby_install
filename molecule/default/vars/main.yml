@@ -5,7 +5,16 @@ ruby_install_test_profile: "{{ ruby_install_test_condition.split('-')[1] }}"
 ruby_install_test_prefix: "{{ '/opt/ruby-custom' if ruby_install_test_profile == 'custom' else '/opt/ruby' }}"
 ruby_install_test_docs: "{{ ruby_install_test_profile != 'custom' }}"
 ruby_install_test_rust: "{{ ruby_install_test_profile == 'rust' }}"
-ruby_install_test_initial_links: "{{ ['bundle', 'rake'] if ruby_install_test_condition == '4.0.9-rust' else [] }}"
+ruby_install_test_installer: >-
+  {{ lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_INSTALLER',
+            default=('v0.2.0' if lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_FROM_V020') == '1' else 'candidate')) }}
+ruby_install_test_roles:
+  candidate: ruby_install
+  v0.2.0: ruby_install_v020
+  v0.3.0: ruby_install_v030
+ruby_install_test_initial_links: >-
+  {{ ['bundle', 'rake'] if ruby_install_test_installer == 'v0.3.0' or
+     (ruby_install_test_installer == 'candidate' and ruby_install_test_condition == '4.0.9-rust') else [] }}
 ruby_install_test_sha256:
   "3.4.12": 5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479
   "4.0.9": c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511

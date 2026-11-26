@@ -7,6 +7,10 @@ import re
 
 STAGES = ("prepare", "converge", "side_effect", "check", "idempotence", "verify")
 COUNTERS = {"ok", "changed", "unreachable", "failed", "skipped", "rescued", "ignored"}
+BASELINES = {
+    "v0.2.0": ("ruby_install_v020", "6b1cd945c5a0d3472c7f1dfe565852db37097596"),
+    "v0.3.0": ("ruby_install_v030", "0002dea544bfd6d52b4f0aaa94a4eff5aec54bd5"),
+}
 
 
 def require(condition, message):
@@ -14,15 +18,28 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def play_recaps(log):
+def play_recaps(log, installer_role=None):
     current = None
     rows = {}
+    expected_roles = {}
+    if installer_role is not None:
+        require(installer_role == "candidate" or installer_role in BASELINES, "unknown installer role")
+        first_role = "ruby_install" if installer_role == "candidate" else BASELINES[installer_role][0]
+        expected_roles = {"converge": first_role, "check": "ruby_install", "idempotence": "ruby_install"}
+    roles = set()
     for line in log.splitlines():
         step = re.search(r"\[default > (\w+)\] Executing$", line)
         if step:
             current = step[1]
+            roles.clear()
+        if current in expected_roles:
+            task = re.match(r"^TASK \[(ruby_install\w*) : ", line)
+            if task:
+                roles.add(task[1])
         if current in STAGES and re.match(r"^ruby-install-default\s*:", line):
             require(current not in rows, "duplicate target recap for " + current)
+            if current in expected_roles:
+                require(roles == {expected_roles[current]}, "wrong or missing role in " + current)
             row = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)}
             require(COUNTERS <= row.keys(), "incomplete target recap for " + current)
             require(row["ok"] > 0 and not any(row[k] for k in ("failed", "unreachable", "ignored")),
@@ -101,7 +118,7 @@ def validate(folder, condition, commit, *, installer_role=None):
     if condition == "3.4.12-custom":
         distribution_ruby(case.get("os_ruby"))
     result = {"commit": commit, "condition": condition,
-              "recaps": play_recaps((folder / "molecule.log").read_text(errors="replace")),
+              "recaps": play_recaps((folder / "molecule.log").read_text(errors="replace"), case.get("installation_role")),
               "resources": resources((folder / "target-limits.txt").read_text(),
                                      json.loads((folder / "target-state.json").read_text()),
                                      (folder / "memory.txt").read_text(), (folder / "cgroup-limits.txt").read_text())}
@@ -109,12 +126,14 @@ def validate(folder, condition, commit, *, installer_role=None):
     if installer_role or installer.exists() or "publication" in case or "installation_role" in case:
         require(installer.is_file(), "missing installer revision")
         installer_sha = installer.read_text().strip()
-        original = "6b1cd945c5a0d3472c7f1dfe565852db37097596"
         observed_role = case.get("installation_role")
-        expected = {"v0.2.0": original, "candidate": commit}
-        require(observed_role in expected and installer_sha == expected[observed_role], "unexpected installer revision")
+        require(observed_role == "candidate" or observed_role in BASELINES, "missing or unknown installer role")
+        expected_sha = commit if observed_role == "candidate" else BASELINES[observed_role][1]
+        require(installer_sha == expected_sha, "unexpected installer revision")
         require(installer_role is None or installer_role == observed_role, "unexpected installer role")
-        publication(case.get("publication"), prefix, ("bundle", "rake") if condition == "4.0.9-rust" else ())
+        prelinked = observed_role == "v0.3.0" or (observed_role == "candidate" and condition == "4.0.9-rust")
+        publication(case.get("publication"), prefix, ("bundle", "rake") if prelinked else ())
+        result["installation_role"] = observed_role
         result["installer_commit"] = installer_sha
     return result
 
@@ -124,7 +143,7 @@ if __name__ == "__main__":
     parser.add_argument("folder", type=Path)
     parser.add_argument("condition")
     parser.add_argument("commit")
-    parser.add_argument("--installer", choices=("v0.2.0", "candidate"), help="require publication with this installer")
+    parser.add_argument("--installer", choices=("candidate", *BASELINES), help="require publication with this installer")
     args = parser.parse_args()
     result = validate(args.folder, args.condition, args.commit, installer_role=args.installer)
     (args.folder / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

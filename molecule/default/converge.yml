@@ -29,8 +29,7 @@
     - name: Install with the selected Role and run all later checks with the candidate
       ansible.builtin.include_role:
         name: >-
-          {{ 'ruby_install_v020' if lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_FROM_V020') == '1'
-          and not ruby_install_test_baseline.stat.exists else 'ruby_install' }}
+          {{ 'ruby_install' if ruby_install_test_baseline.stat.exists else ruby_install_test_roles[ruby_install_test_installer] }}
   post_tasks:
     - name: Require a new installation on the first run and a healthy recorded Ruby on reruns
       ansible.builtin.assert:

@@ -1,6 +1,7 @@
 """Regression checks for the six-case workflow and its evidence gate."""
 import importlib.util
 from pathlib import Path
+import shlex
 import unittest
 
 import yaml
@@ -11,12 +12,15 @@ evidence = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evidence)
 
 
-def recap_log():
+def recap_log(installer="ruby_install"):
     lines = []
     for stage in evidence.STAGES:
         changed = 5 if stage == "converge" else 0
-        lines.extend([f"INFO     [default > {stage}] Executing",
-                      f"ruby-install-default  : ok=5 changed={changed} unreachable=0 failed=0 skipped=1 rescued=0 ignored=0"])
+        lines.append(f"INFO     [default > {stage}] Executing")
+        if stage in ("converge", "check", "idempotence"):
+            role = installer if stage == "converge" else "ruby_install"
+            lines.append(f"TASK [{role} : Inspect Ruby] ***")
+        lines.append(f"ruby-install-default  : ok=5 changed={changed} unreachable=0 failed=0 skipped=1 rescued=0 ignored=0")
     return "\n".join(lines)
 
 
@@ -34,6 +38,10 @@ class ReleaseMatrix(unittest.TestCase):
         preexisting = dict(after, public_commands=dict(initial, ruby="a" * 64, gem="b" * 64))
         evidence.publication(dict(result, before=dict(before, public_commands=initial), created=preexisting,
                                   after=preexisting), "/opt/ruby", ("bundle", "rake"))
+        replaced = dict(preexisting, public_commands=dict(preexisting["public_commands"], bundle="f" * 64))
+        with self.assertRaises(ValueError):
+            evidence.publication(dict(result, before=dict(before, public_commands=initial), created=replaced,
+                                      after=replaced), "/opt/ruby", ("bundle", "rake"))
         for change in (dict(prefix="4" * 64), dict(public_commands=dict(after["public_commands"], irb="c" * 64))):
             wrong = dict(after, **change)
             with self.assertRaises(ValueError):
@@ -73,16 +81,46 @@ class ReleaseMatrix(unittest.TestCase):
         jobs = config["workflows"]["v020-release-matrix"]["jobs"]
         cases = [f"{v}-{p}" for v in ("3.4.12", "4.0.9") for p in ("default", "custom", "rust")]
         self.assertEqual(config["jobs"]["v020-role-condition"]["parameters"]["condition"]["enum"], cases)
-        self.assertEqual(len(jobs), 4 + len(cases))
+        self.assertEqual(len(jobs), 5 + len(cases))
         self.assertEqual(jobs[0], "trailing-whitespace")
         self.assertEqual(jobs[1]["yamllint"]["requires"], ["trailing-whitespace"])
         self.assertEqual(jobs[2]["ansible-lint"]["requires"], ["yamllint"])
         self.assertEqual(jobs[3]["molecule"]["requires"], ["ansible-lint"])
-        previous = jobs[3]["molecule"]["name"]
-        for job, case in zip(jobs[4:], cases):
+        upgrade = jobs[4]["v020-role-condition"]
+        self.assertEqual(upgrade, {"name": "upgrade-from-v0.3.0", "condition": "4.0.9-custom",
+                                    "installer": "v0.3.0", "requires": [jobs[3]["molecule"]["name"]]})
+        job_parameters = config["jobs"]["v020-role-condition"]["parameters"]
+        self.assertEqual(job_parameters["installer"]["default"], "candidate")
+        previous = upgrade["name"]
+        for job, case in zip(jobs[5:], cases):
             row = job["v020-role-condition"]
             self.assertEqual(row, {"condition": case, "name": "ruby-" + case, "requires": [previous]})
             previous = row["name"]
+
+    def test_installer_must_run_first_and_candidate_must_run_both_reruns(self):
+        log = recap_log("ruby_install_v030")
+        evidence.play_recaps(log, "v0.3.0")
+        evidence.play_recaps(recap_log("ruby_install_v020"), "v0.2.0")
+        evidence.play_recaps(recap_log(), "candidate")
+        for wrong in (recap_log(), recap_log("ruby_install_v020"),
+                      log.replace("TASK [ruby_install :", "TASK [ruby_install_v030 :", 1),
+                      log.replace("TASK [ruby_install :", "TASK [ruby_install_v030 :"),
+                      log.replace("TASK [ruby_install_v030 :", "TASK [ruby_install : Extra]\nTASK [ruby_install_v030 :"),
+                      log.replace("TASK [ruby_install_v030 : Inspect Ruby] ***", "")):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                evidence.play_recaps(wrong, "v0.3.0")
+
+    def test_workflows_pass_the_expected_installer_to_the_runner(self):
+        config = yaml.safe_load((ROOT / ".circleci/config.yml").read_text())
+        for job, expected_argument in (("molecule", "--from-v020"), ("v020-role-condition", "<< parameters.installer >>")):
+            commands = [step["run"]["command"] for step in config["jobs"][job]["steps"]
+                        if isinstance(step, dict) and "run" in step]
+            calls = [shlex.split(line) for line in "\n".join(commands).splitlines()
+                     if line.lstrip().startswith("bash molecule/default/run-ci.sh ")]
+            self.assertEqual([args[-1] for args in calls], [expected_argument], job)
+        preflight = next(item["molecule"] for item in config["workflows"]["build"]["jobs"]
+                         if isinstance(item, dict) and item.get("molecule", {}).get("name") == "preflight")
+        self.assertIn("feature/v1.0.0-release", preflight["filters"]["branches"]["only"])
 
     def test_missing_duplicate_failed_and_changed_reruns_do_not_pass(self):
         log = recap_log()

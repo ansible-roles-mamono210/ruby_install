@@ -121,6 +121,10 @@ jobs:
       condition:
         type: enum
         enum: [3.4.12-default, 3.4.12-custom, 3.4.12-rust, 4.0.9-default, 4.0.9-custom, 4.0.9-rust]
+      installer:
+        type: enum
+        enum: [candidate, v0.3.0]
+        default: candidate
     environment:
       MATRIX_CONTROLLER: &v020_controller ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
       MATRIX_TARGET: &v020_target ghcr.io/docker-images-mamono210/ansible-test/centos-stream9@sha256:96fbd1eac7c972466192da5183e80deeacd226332265d1698b2581bf7666ccd2
@@ -128,13 +132,13 @@ jobs:
       - checkout:
           path: ruby_install
       - run:
-          name: Run one fresh release condition
+          name: Install Ruby and verify candidate reruns
           no_output_timeout: 22m
           command: |
             set -euo pipefail
             sudo chmod 666 /var/run/docker.sock
             cd ruby_install
-            if [[ "<< parameters.condition >>" == 3.4.12-default ]]; then
+            if [[ "<< parameters.condition >>" == 3.4.12-default && "<< parameters.installer >>" == candidate ]]; then
               release_tmp=$(mktemp -d)
               trap 'rm -rf -- "$release_tmp"' EXIT
               # Bind only the readable checkout into the non-root Molecule controller.
@@ -147,7 +151,7 @@ jobs:
               )
               cd "$release_source"
             fi
-            bash molecule/default/run-ci.sh "$MATRIX_CONTROLLER" "$MATRIX_TARGET" "<< parameters.condition >>"
+            bash molecule/default/run-ci.sh "$MATRIX_CONTROLLER" "$MATRIX_TARGET" "<< parameters.condition >>" "<< parameters.installer >>"
       - store_artifacts:
           path: ~/ruby-install-default-evidence
           destination: ruby-install-default
@@ -370,7 +374,7 @@ workflows:
             - ansible-lint
           filters:
             branches:
-              only: [feature/v0.2.0-install, feature/v0.3.0-links]
+              only: [main, feature/v0.2.0-install, feature/v0.3.0-links, feature/v1.0.0-release]
       - molecule:
           molecule-no-output-timeout: 22m
           matrix:
@@ -428,9 +432,14 @@ workflows:
           molecule-no-output-timeout: 22m
           requires: [ansible-lint]
       - v020-role-condition:
+          name: upgrade-from-v0.3.0
+          condition: 4.0.9-custom
+          installer: v0.3.0
+          requires: [preflight]
+      - v020-role-condition:
           name: ruby-3.4.12-default
           condition: 3.4.12-default
-          requires: [preflight]
+          requires: [upgrade-from-v0.3.0]
       - v020-role-condition:
           name: ruby-3.4.12-custom
           condition: 3.4.12-custom

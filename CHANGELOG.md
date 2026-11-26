@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased — v0.3.0
+## Unreleased — v1.0.0
+
+- Add a release check against a Ruby installation and two command links created
+  by the published v0.3.0 Role. Verify the installer revision and the Role
+  used in each rerun. The six fresh candidate installations remain part of CI.
+- Add [fixed-revision installation, migration and recovery examples](docs/releases/v1.0.0.md).
+
+## v0.3.0 — 2026-11-23 (JST)
 
 - Publish selected Ruby commands under `/usr/local/bin` when enabled. The
   default remains off. A healthy v0.2.0 installation can add links without
@@ -12,6 +19,11 @@
   conditions install the candidate and compare its records with the published
   v0.2.0 observations. The Ruby 4.0.9 Rust-present condition also publishes
   commands during the first installation, then adds two more on a healthy rerun.
+- [Published Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.3.0)
+  at `0002dea544bfd6d52b4f0aaa94a4eff5aec54bd5`.
+  [Normal CI #480](https://app.circleci.com/pipelines/github/ansible-roles-mamono210/ruby_install/480/workflows/0d37ed82-f0b0-4d1b-b2a1-498963fa3c2e)
+  and [release CI #481](https://app.circleci.com/pipelines/github/ansible-roles-mamono210/ruby_install/481/workflows/c8bbe26e-c690-4a60-b397-02ab3415896d)
+  passed at that revision.
 
 ## v0.2.0 — 2026-11-22
 

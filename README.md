@@ -3,8 +3,8 @@
 # ruby_install
 
 This Ansible Role installs Ruby from verified source into a dedicated prefix on
-CentOS Stream 9 x86_64. The v0.3.0 development branch adds optional command links
-to the installation and rerun checks published in v0.2.0. Gather
+CentOS Stream 9 x86_64. The v1.0.0 candidate uses the v0.3.0 installation
+contract and optional command links. Gather
 target facts and run the Role with root privileges. The minimum controller
 version is ansible-core 2.21.6.
 
@@ -15,9 +15,11 @@ installation with matching settings and links returns unchanged. By default, use
 the commands in `<prefix>/bin` directly. To publish selected commands, enable
 `ruby_install_create_symlinks` and set `ruby_install_symlink_commands`.
 
-The [v0.2.0 Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.2.0)
-identifies the six published installation conditions and their CI results. See the
-[v0.2.0 notes](docs/releases/v0.2.0.md) for its record format, migration and recovery.
+See the [v1.0.0 candidate guide](docs/releases/v1.0.0.md) for fixed-revision
+installation, migration examples, recovery, and the checks required for release.
+The [v0.3.0 Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.3.0)
+records the six installations and link compatibility verified for that version.
+The [v0.2.0 notes](docs/releases/v0.2.0.md) describe the shared installation record.
 
 ## v0.1.0 development snapshot
 
@@ -506,8 +508,8 @@ requirements, not names of existing Molecule scenarios or CI jobs:
 | T12–T14 | Owned-workspace success/failure handling, fixed-ref Role distribution, cleanup of test containers with required failure evidence retained |
 | T15 | The five rejected old names, including externally visible definitions; wrong types, invalid versions, checksum/URL errors, command-list errors and unsafe paths; workspace environment failures for new installs and healthy-rerun controls that skip those checks |
 
-On the installation and link-publication feature branches, the `preflight` CI job uses the pinned controller
-and target images. It runs target Python unit tests, controller-only entry
+On the release branches and on `main`, the `preflight` CI job uses the pinned
+controller and target images. It runs target Python unit tests, controller-only entry
 cases and the `molecule/preflight` scenario through the normal Role entry.
 The first scenario checks an absent prefix in check mode, rejects an unavailable
 workspace in normal mode and preserves an unmanaged Ruby without executing it.
@@ -520,21 +522,24 @@ with the pre-run snapshot. The specified build workspace must stay absent.
 The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
 has a 20-minute timeout. Ordinary CI installs Ruby 3.4.12 with documentation
 using the published v0.2.0 Role, then exercises the candidate on that prefix.
-The six-condition workflow installs the candidate. Its Ruby 4.0.9 Rust-present
+The release workflow first installs Ruby 4.0.9 with the published v0.3.0 Role
+in the custom prefix, with documentation off and `bundle` and `rake` linked.
+Candidate reruns must reuse both links before adding `ruby` and `gem`.
+The six fresh-install conditions use the candidate. Its Ruby 4.0.9 Rust-present
 condition publishes `bundle` and `rake` during installation. All six conditions
 preview, add and reuse `ruby` and `gem` on the recorded installation.
 
 The preflight scenarios also exercise a noexec workspace, HTTPS redirects,
 a checksum mismatch and retention of a failed configure log. The Ruby 3.4.12
 custom-prefix matrix row compares the distribution Ruby before and after the
-Role. The first matrix row retrieves the candidate by full SHA into a new
+Role. The first fresh-install row retrieves the candidate by full SHA into a new
 directory and runs the Role from that checkout.
 
 For a final candidate, run a pipeline on its branch with the boolean parameter
 `run_v020_release_matrix=true` and the other probe flags at their defaults.
-The `v020-release-matrix` workflow runs lint and preflight, then the six rows
-above in order. Each row gets a fresh target and the pinned controller and
-target images. A Rust-present fixture must compile an object before the Role
+The `v020-release-matrix` workflow runs lint, preflight, the v0.3.0 compatibility
+job, then the six rows above in order. Each row gets a fresh target with the
+pinned controller and target images. A Rust-present fixture must compile an object before the Role
 runs. Each row checks the Role's installation record, nine managed commands,
 native libraries, build and runtime JIT state, and the requested documentation.
 Check mode and the identical normal rerun must both report zero changes.
@@ -612,7 +617,8 @@ The r55 decisions (contract v11 / Roadmap v12) supplement that specification;
 this README incorporates them without reclassifying evaluation as Role proof.
 CI #474 exercised the Phase 2/3 implementation at
 `d928975859613bf58c6c41571da47f33ccef50a9`. The six real Role conditions passed.
-The [candidate notes](docs/releases/v0.2.0.md) identify the remaining release checks.
+The [v0.2.0 notes](docs/releases/v0.2.0.md) record that version's validation.
+The [v1.0.0 guide](docs/releases/v1.0.0.md#candidate-verification) identifies the checks for this candidate.
 
 Before each publication, align that release's implementation claims, metadata,
 examples, CHANGELOG, tests and release notes; verify the candidate's fixed-ref

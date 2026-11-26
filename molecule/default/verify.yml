@@ -96,7 +96,7 @@
           after_install: "{{ ruby_install_before.content | b64decode | from_json }}"
           after_reruns: "{{ ruby_install_after.stdout | from_json }}"
           workspaces_after_reruns: "{{ ruby_install_workspaces.matched }}"
-          installation_role: "{{ 'v0.2.0' if lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_FROM_V020') == '1' else 'candidate' }}"
+          installation_role: "{{ ruby_install_test_installer }}"
           publication: "{{ ruby_install_test_link_result }}"
       ansible.builtin.copy:
         dest: /var/tmp/ruby-install-case.json
