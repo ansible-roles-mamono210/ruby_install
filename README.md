@@ -3,10 +3,10 @@
 # ruby_install
 
 This Ansible Role installs Ruby from verified source into a dedicated prefix on
-CentOS Stream 9 x86_64. The v1.0.0 candidate uses the v0.3.0 installation
-contract and optional command links. Gather
-target facts and run the Role with root privileges. The minimum controller
-version is ansible-core 2.21.6.
+CentOS Stream 9 x86_64. The first stable release, `v1.0.0`, installs Ruby
+3.4.12 under `/opt/ruby` by default and was also tested with Ruby 4.0.9.
+Gather target facts and run the Role with root privileges. The minimum
+controller version is ansible-core 2.21.6.
 
 On first installation the Role verifies the downloaded source, builds Ruby and
 checks the installed commands, libraries and documentation before writing a
@@ -15,8 +15,10 @@ installation with matching settings and links returns unchanged. By default, use
 the commands in `<prefix>/bin` directly. To publish selected commands, enable
 `ruby_install_create_symlinks` and set `ruby_install_symlink_commands`.
 
-See the [v1.0.0 candidate guide](docs/releases/v1.0.0.md) for fixed-revision
-installation, migration examples, recovery, and the checks required for release.
+Use the `v1.0.0` tag to install the stable release. The guide includes
+installation commands, migration and recovery examples, and verification results.
+[v1.0.0 guide](docs/releases/v1.0.0.md) · [GitHub Release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v1.0.0)
+
 The [v0.3.0 Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.3.0)
 records the six installations and link compatibility verified for that version.
 The [v0.2.0 notes](docs/releases/v0.2.0.md) describe the shared installation record.
@@ -62,7 +64,7 @@ publication are outside v1.0.0.
 
 ### Public variables
 
-The development branch defines these ten defaults. The Meaning column describes the contract for the completed Role.
+The v1.0.0 Role defines these ten defaults.
 
 | Variable | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -408,7 +410,9 @@ not a reading of a production `secure_path` configuration or a universal CentOS
 default. The separate non-root become check used a disposable test user and sudo
 rule; it does not establish stock non-root privileges or production become setup.
 
-### Installation example for v0.2.0
+<a name="installation-example-for-v020"></a>
+
+### Installation example
 
 Make the Role available as `ruby_install` on the controller. This play installs
 the default Ruby with standard documentation and links disabled.
@@ -584,18 +588,17 @@ Role release numbers are distinct from Ruby 3.4.12 or 4.0.9. The adopted
 stages retain Phase 1–7 responsibilities; verification, documentation and
 publication (Phases 5–7) apply to each release's scope.
 
-| Planned Role release | Scope and acceptance boundary |
+| Role release | Scope and acceptance boundary |
 | --- | --- |
 | v0.1.0 | Phase 1 specification/evaluation development snapshot. Reconciled specifications, fixed evaluation references, LICENSE/meta/CHANGELOG/Release Notes and fixed-ref retrieval. Explicitly label the included legacy Role and unimplemented new contract. Candidate documentation/static checks and affected evaluation regressions are required; unchanged evaluation sources/conditions may reference existing evidence at its original commit. No claim of real Role installation or full four-category contract compliance. |
 | v0.2.0 | Phases 2+3: installation, complete post-install checks, Role-generated records, healthy identical rerun, invalid-state protection and owned workspace management. Six real Role conditions, normal four CI categories, applicable T01–T06 and T09–T15, T07 input validation and T08 disabled-link residual protection. Link-ON requests stop before changes. Include minimum manual recovery and migration instructions. |
 | v0.3.0 | Phase 4: full T07/T08 link publication and failure handling; v0.2.0 regressions, six real Role conditions and normal four CI categories. Prove rerun/link addition using records actually written by v0.2.0. Extra gem commands remain outside publication scope. |
 | v1.0.0 | Complete T01–T15, six real Role conditions, normal four CI categories, v0.2.0/v0.3.0 prefix/link compatibility, distribution and migration/recovery examples. Finalize the public contract without adding unrelated features to the completion criteria. |
 
-Redmine Version identifiers are `0.1.0`, `0.2.0`, `0.3.0` and `1.0.0`, paired
-with Git tags `v0.1.0`, `v0.2.0`, `v0.3.0` and `v1.0.0`. The 0.x versions use
-GitHub Pre-release; v1.0.0 uses GitHub Release. These are planned identifiers,
-not a claim that the corresponding objects exist. Tickets use target versions;
-`release_tag` remains unused and Galaxy publication is deferred.
+Git tags `v0.1.0`, `v0.2.0` and `v0.3.0` were published as GitHub pre-releases.
+Tag `v1.0.0` is the first stable release. The Roadmap specifies `0.1.0`,
+`0.2.0`, `0.3.0` and `1.0.0` as the corresponding Redmine target version names.
+The `release_tag` field remains unused and Galaxy publication is deferred.
 
 Phase 2 and Phase 3 share record assembly/validation and may be developed in
 parallel. Their end-to-end installation/rerun acceptance is joined at v0.2.0.
@@ -618,7 +621,8 @@ this README incorporates them without reclassifying evaluation as Role proof.
 CI #474 exercised the Phase 2/3 implementation at
 `d928975859613bf58c6c41571da47f33ccef50a9`. The six real Role conditions passed.
 The [v0.2.0 notes](docs/releases/v0.2.0.md) record that version's validation.
-The [v1.0.0 guide](docs/releases/v1.0.0.md#candidate-verification) identifies the checks for this candidate.
+Normal CI #483 and release CI #484 passed on the commit tagged `v1.0.0`.
+[v1.0.0 verification results](docs/releases/v1.0.0.md#release-verification)
 
 Before each publication, align that release's implementation claims, metadata,
 examples, CHANGELOG, tests and release notes; verify the candidate's fixed-ref

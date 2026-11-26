@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased — v1.0.0
+## v1.0.0 — 2026-11-26 (JST)
 
 - Add a release check against a Ruby installation and two command links created
   by the published v0.3.0 Role. Verify the installer revision and the Role
-  used in each rerun. The six fresh candidate installations remain part of CI.
+  used in each rerun. The six fresh installations remain part of CI.
 - Add [fixed-revision installation, migration and recovery examples](docs/releases/v1.0.0.md).
+- Publish the first stable release at `057658e284ae63769722d0c47116b41fb0e5b3f6`.
+  All five jobs in normal CI #483 and all eleven in release CI #484 passed at that commit.
+  [GitHub Release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v1.0.0) · [Verification results](docs/releases/v1.0.0.md#release-verification)
 
 ## v0.3.0 — 2026-11-23 (JST)
 
