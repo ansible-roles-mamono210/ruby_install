@@ -7,7 +7,10 @@
     - name: Require a supported release condition and target
       ansible.builtin.assert:
         that:
-          - ruby_install_test_condition is match('^(3\.4\.12|4\.0\.9)-(default|custom|rust)$')
+          - ruby_install_test_version in ruby_install_test_sha256
+          - ruby_install_test_profile in ['default', 'custom', 'rust']
+          - ruby_install_test_condition == ruby_install_test_version + '-' + ruby_install_test_profile
+          - ruby_install_test_installer != 'v1.0.0' or ruby_install_test_condition == '3.4.12-default'
           - ansible_facts.distribution == 'CentOS' and ansible_facts.distribution_release == 'Stream'
           - ansible_facts.distribution_major_version == '9' and ansible_facts.architecture == 'x86_64'
 
@@ -21,14 +24,15 @@
         - /var/tmp/ruby-install-rust-before.json
         - /var/tmp/ruby-install-os-ruby.json
         - /var/tmp/ruby-install-case.json
+        - /var/tmp/ruby-install-version-mismatch.json
       register: ruby_install_test_paths
 
     - name: Require a fresh target for this installation
       ansible.builtin.assert:
         that: ruby_install_test_paths.results | selectattr('stat.exists') | list | length == 0
 
-    - name: Prepare the OS Ruby for the 3.4.12 custom-prefix coexistence check
-      when: ruby_install_test_condition == '3.4.12-custom'
+    - name: Prepare the OS Ruby for the 3.4 custom-prefix coexistence check
+      when: ruby_install_test_os_ruby_case
       block:
         - name: Require the disposable Docker target before installing the OS Ruby
           ansible.builtin.assert:

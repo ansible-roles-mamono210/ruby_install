@@ -4,10 +4,10 @@ set -euo pipefail
 controller="ruby-install-controller-${CIRCLE_BUILD_NUM:?}"
 target=ruby-install-default
 condition=${3:-3.4.12-default}
-case "$condition" in
-  3.4.12-default|3.4.12-custom|3.4.12-rust|4.0.9-default|4.0.9-custom|4.0.9-rust) ;;
-  *) echo "Unsupported condition: $condition" >&2; exit 2 ;;
-esac
+if [[ ! $condition =~ ^(3\.4\.(12|13)|4\.0\.(9|10))-(default|custom|rust)$ ]]; then
+  echo "Unsupported condition: $condition" >&2
+  exit 2
+fi
 case "${4:-candidate}" in
   candidate) installer_role=candidate ;;
   --from-v020|v0.2.0)
@@ -19,6 +19,12 @@ case "${4:-candidate}" in
     installer_role=v0.3.0
     baseline_name=ruby_install_v030
     baseline_sha=0002dea544bfd6d52b4f0aaa94a4eff5aec54bd5
+    ;;
+  v1.0.0)
+    [[ "$condition" == 3.4.12-default ]] || { echo "v1.0.0 requires 3.4.12-default" >&2; exit 2; }
+    installer_role=v1.0.0
+    baseline_name=ruby_install_v100
+    baseline_sha=057658e284ae63769722d0c47116b41fb0e5b3f6
     ;;
   *) echo "Unsupported installer: $4" >&2; exit 2 ;;
 esac
@@ -65,6 +71,10 @@ finish() {
       for peak in /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory/memory.max_usage_in_bytes; do
         if test -r "$peak"; then cat "$peak"; break; fi
       done' > "$evidence/memory-peak-bytes.txt"
+    if [[ "$installer_role" == v1.0.0 ]] &&
+        ! docker cp "$target:/var/tmp/ruby-install-version-mismatch.json" "$evidence/version-mismatch.json"; then
+      (( status != 0 )) || status=1
+    fi
     if (( status == 0 )); then
       docker cp "$target:/var/tmp/ruby-install-case.json" "$evidence/case.json" &&
         python3 molecule/default/check_evidence.py "$evidence" "$condition" "$commit" --installer "$installer_role" || status=1
@@ -111,6 +121,7 @@ if [[ "$installer_role" != candidate ]]; then
 fi
 timeout --signal=TERM --kill-after=20s 20m docker run --name "$controller" \
   "${baseline_args[@]}" \
+  -e "RUBY_INSTALL_TEST_COMMIT=$commit" \
   -e "RUBY_INSTALL_TEST_INSTALLER=$installer_role" \
   -e "MOLECULE_IMAGE=$2" -e "RUBY_INSTALL_MATRIX_CASE=$condition" -v "$PWD":/tmp/ruby_install:ro -w /tmp/ruby_install \
   -v /usr/bin/docker:/usr/bin/docker -v /var/run/docker.sock:/var/run/docker.sock \

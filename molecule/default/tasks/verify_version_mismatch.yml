@@ -1,0 +1,55 @@
+---
+- name: Resolve the links created by the v1.0.0 installer after both candidate reruns
+  ansible.builtin.command:
+    argv: [/usr/bin/readlink, -e, /usr/local/bin/ruby, /usr/local/bin/gem]
+  changed_when: false
+  register: ruby_install_test_existing_links
+
+- name: Request Ruby 3.4.13 through the candidate's normal Role entry
+  block:
+    - name: Run the candidate against the same prefix with the same public links
+      ansible.builtin.include_role:
+        name: ruby_install
+        apply:
+          check_mode: false
+      vars:
+        ruby_install_version: "{{ ruby_install_test_requested_version }}"
+        ruby_install_prefix: "{{ ruby_install_test_prefix }}"
+        ruby_install_create_symlinks: true
+        ruby_install_symlink_commands: "{{ ruby_install_test_initial_links }}"
+  rescue:
+    - name: Capture the actual stop reason and change flag
+      ansible.builtin.set_fact:
+        ruby_install_test_stop: "{{ ansible_failed_result.msg }}"
+        ruby_install_test_stop_changed: "{{ ansible_failed_result.changed }}"
+
+- name: Read the four protected values again after the version request
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/../shared/snapshot.py {{ ruby_install_test_prefix }}"
+    executable: /usr/bin/python3
+  register: ruby_install_test_after_mismatch
+  changed_when: false
+
+- name: Assemble observations before enforcing the expected stop
+  ansible.builtin.set_fact:
+    ruby_install_test_mismatch:
+      requested_version: "{{ ruby_install_test_requested_version }}"
+      reason: "{{ ruby_install_test_stop | default('Role returned successfully') }}"
+      changed: "{{ ruby_install_test_stop_changed | default(true) }}"
+      targets: "{{ ruby_install_test_existing_links.stdout_lines }}"
+      before: "{{ ruby_install_after.stdout | from_json }}"
+      after: "{{ ruby_install_test_after_mismatch.stdout | from_json }}"
+
+- name: Keep the observations even if the version-change assertion fails
+  ansible.builtin.copy:
+    dest: /var/tmp/ruby-install-version-mismatch.json
+    content: "{{ ruby_install_test_mismatch | to_nice_json }}\n"
+    mode: "0600"
+
+- name: Require the version stop with the original installation and links intact
+  ansible.builtin.assert:
+    that:
+      - ruby_install_test_mismatch.reason.startswith('VERSION_MISMATCH:')
+      - ruby_install_test_mismatch.changed is false
+      - ruby_install_test_mismatch.before == ruby_install_test_mismatch.after
+      - ruby_install_test_mismatch.targets == [ruby_install_test_prefix + '/bin/ruby', ruby_install_test_prefix + '/bin/gem']

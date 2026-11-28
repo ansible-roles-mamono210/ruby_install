@@ -10,7 +10,9 @@ COUNTERS = {"ok", "changed", "unreachable", "failed", "skipped", "rescued", "ign
 BASELINES = {
     "v0.2.0": ("ruby_install_v020", "6b1cd945c5a0d3472c7f1dfe565852db37097596"),
     "v0.3.0": ("ruby_install_v030", "0002dea544bfd6d52b4f0aaa94a4eff5aec54bd5"),
+    "v1.0.0": ("ruby_install_v100", "057658e284ae63769722d0c47116b41fb0e5b3f6"),
 }
+SOURCE_SHA256 = json.loads((Path(__file__).resolve().parents[2] / "tests/fixtures/release_source_sha256.json").read_text())
 
 
 def require(condition, message):
@@ -100,22 +102,43 @@ def publication(value, prefix, initial_links=()):
     require(value.get("targets") == [prefix + "/bin/ruby", prefix + "/bin/gem"], "wrong public link targets")
 
 
+def installation_record(record, version, prefix, docs):
+    jit = {"yjit": False, "rjit" if version.startswith("3.4.") else "zjit": False}
+    expected = {"schema_version": 1, "state": "complete", "ruby_version": version, "canonical_prefix": prefix,
+                "source_sha256": SOURCE_SHA256[version], "documentation": docs, "shared": True, "jit": jit}
+    # The record schema distinguishes JSON booleans from numbers.
+    require(json.dumps(record, sort_keys=True) == json.dumps(expected, sort_keys=True), "wrong installation record")
+
+
+def version_mismatch(observation, baseline):
+    require(isinstance(observation, dict) and observation.get("requested_version") == "3.4.13"
+            and isinstance(observation.get("reason"), str) and observation["reason"].startswith("VERSION_MISMATCH:")
+            and observation.get("changed") is False, "missing expected version mismatch")
+    require(observation.get("targets") == ["/opt/ruby/bin/ruby", "/opt/ruby/bin/gem"], "wrong v1.0.0 links")
+    before = observation.get("before")
+    require(isinstance(before, dict) and set(before) == {"prefix", "public_commands", "installed_packages", "repository_files"}
+            and all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{64}", v) for v in before.values()),
+            "missing v1.0.0 snapshot")
+    require(before == baseline == observation.get("after"), "v1.0.0 protected state changed")
+
+
 def validate(folder, condition, commit, *, installer_role=None):
-    require(re.fullmatch(r"(3\.4\.12|4\.0\.9)-(default|custom|rust)", condition), "unsupported condition")
+    v, _, profile = condition.partition("-")
+    require(v in SOURCE_SHA256 and profile in ("default", "custom", "rust"), "unsupported condition")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "missing Git revision")
     case = json.loads((folder / "case.json").read_text())
-    v, profile = condition.split("-")
-    record = case["record"]
     prefix = "/opt/ruby-custom" if profile == "custom" else "/opt/ruby"
-    require(case["condition"] == condition and record["state"] == "complete" and record["ruby_version"] == v and
-            record["canonical_prefix"] == prefix and record["documentation"] is (profile != "custom"),
-            "wrong case or installation record")
+    require(case["condition"] == condition, "wrong case")
+    # Archived v1.0.0 cases carry the candidate revision in the sibling commit.txt.
+    case_commit = case["commit"] if "commit" in case else (folder / "commit.txt").read_text().strip()
+    require(case_commit == commit, "case belongs to a different candidate")
+    installation_record(case["record"], v, prefix, profile != "custom")
     require(case["after_install"] == case["after_reruns"] and case["workspaces_after_reruns"] == 0 and
             set(case["after_install"]) == {"prefix", "public_commands", "installed_packages", "repository_files"},
             "protected state changed or evidence missing")
     require(case["rust_before"] == case["rust_after"] and case["rust_before"]["installed"] is (profile == "rust"),
             "invalid compiler fixture")
-    if condition == "3.4.12-custom":
+    if v.startswith("3.4.") and profile == "custom":
         distribution_ruby(case.get("os_ruby"))
     result = {"commit": commit, "condition": condition,
               "recaps": play_recaps((folder / "molecule.log").read_text(errors="replace"), case.get("installation_role")),
@@ -131,8 +154,15 @@ def validate(folder, condition, commit, *, installer_role=None):
         expected_sha = commit if observed_role == "candidate" else BASELINES[observed_role][1]
         require(installer_sha == expected_sha, "unexpected installer revision")
         require(installer_role is None or installer_role == observed_role, "unexpected installer role")
-        prelinked = observed_role == "v0.3.0" or (observed_role == "candidate" and condition == "4.0.9-rust")
-        publication(case.get("publication"), prefix, ("bundle", "rake") if prelinked else ())
+        if observed_role == "v1.0.0":
+            require(condition == "3.4.12-default", "wrong v1.0.0 baseline condition")
+            mismatch = json.loads((folder / "version-mismatch.json").read_text())
+            require(mismatch == case.get("version_mismatch"), "version-mismatch evidence differs from case")
+            version_mismatch(mismatch, case["after_reruns"])
+            result["version_mismatch"] = mismatch
+        else:
+            prelinked = observed_role == "v0.3.0" or (observed_role == "candidate" and v.startswith("4.0.") and profile == "rust")
+            publication(case.get("publication"), prefix, ("bundle", "rake") if prelinked else ())
         result["installation_role"] = observed_role
         result["installer_commit"] = installer_sha
     return result

@@ -40,11 +40,13 @@ def entry_cases():
     for i, value in enumerate(("3.4", "3.4.12-rc1", "4.1.0", "", "latest", ">=3.4", 3.4)):
         case("invalid_version_" + str(i), INVALID, ruby_install_version=value)
     case("unknown_digest", INVALID, ruby_install_version="3.4.99")
+    for version in ("3.4.13", "4.0.10"):
+        case("registered_" + version.replace(".", "_"), MISSING_FACTS, ruby_install_version=version)
     case("explicit_url_needs_digest", INVALID, ruby_install_download_url="https://example.org/ruby")
     case("relative_prefix", INVALID, ruby_install_prefix="opt/ruby")
     case("shared_prefix", INVALID, ruby_install_prefix="/usr/local")
     case("overlap", INVALID, ruby_install_prefix="/opt/ruby", ruby_install_workspace="/opt/ruby/tmp")
-    case("valid_custom", MISSING_FACTS, ruby_install_version="4.0.10",
+    case("valid_custom", MISSING_FACTS, ruby_install_version="4.0.99",
          ruby_install_download_url="https://example.org/ruby", ruby_install_download_checksum="sha256:" + "1" * 64)
 
     return cases

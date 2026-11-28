@@ -1,5 +1,6 @@
 ---
 - name: Compare the installed schema with the matching v0.2.0 CI record
+  when: ruby_install_test_version in ['3.4.12', '4.0.9']
   vars:
     ruby_install_test_v020: "{{ lookup('ansible.builtin.file', playbook_dir + '/../../tests/fixtures/v020_install_records.json') | from_json }}"
   ansible.builtin.assert:

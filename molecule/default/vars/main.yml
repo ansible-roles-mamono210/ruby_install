@@ -12,9 +12,11 @@ ruby_install_test_roles:
   candidate: ruby_install
   v0.2.0: ruby_install_v020
   v0.3.0: ruby_install_v030
+  v1.0.0: ruby_install_v100
 ruby_install_test_initial_links: >-
-  {{ ['bundle', 'rake'] if ruby_install_test_installer == 'v0.3.0' or
-     (ruby_install_test_installer == 'candidate' and ruby_install_test_condition == '4.0.9-rust') else [] }}
-ruby_install_test_sha256:
-  "3.4.12": 5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479
-  "4.0.9": c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511
+  {{ ['ruby', 'gem'] if ruby_install_test_installer == 'v1.0.0' else
+     ['bundle', 'rake'] if ruby_install_test_installer == 'v0.3.0' or
+     (ruby_install_test_installer == 'candidate' and ruby_install_test_version.startswith('4.0.') and ruby_install_test_rust)
+     else [] }}
+ruby_install_test_os_ruby_case: "{{ ruby_install_test_version.startswith('3.4.') and ruby_install_test_profile == 'custom' }}"
+ruby_install_test_sha256: "{{ lookup('ansible.builtin.file', playbook_dir + '/../../tests/fixtures/release_source_sha256.json') | from_json }}"

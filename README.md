@@ -3,8 +3,9 @@
 # ruby_install
 
 This Ansible Role installs Ruby from verified source into a dedicated prefix on
-CentOS Stream 9 x86_64. The first stable release, `v1.0.0`, installs Ruby
-3.4.12 under `/opt/ruby` by default and was also tested with Ruby 4.0.9.
+CentOS Stream 9 x86_64. The default is Ruby 3.4.12 under `/opt/ruby`.
+The v1.1.0 candidate adds Ruby 3.4.13 and 4.0.10 to the two sources registered
+in v1.0.0 (3.4.12 and 4.0.9). Select a version when installing into a fresh prefix.
 Gather target facts and run the Role with root privileges. The minimum
 controller version is ansible-core 2.21.6.
 
@@ -15,7 +16,7 @@ installation with matching settings and links returns unchanged. By default, use
 the commands in `<prefix>/bin` directly. To publish selected commands, enable
 `ruby_install_create_symlinks` and set `ruby_install_symlink_commands`.
 
-Use the `v1.0.0` tag to install the stable release. The guide includes
+Use the `v1.0.0` tag to install the first stable release. Its guide includes
 installation commands, migration and recovery examples, and verification results.
 [v1.0.0 guide](docs/releases/v1.0.0.md) · [GitHub Release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v1.0.0)
 
@@ -30,7 +31,9 @@ evaluation results at `01a647d0b3612b4707781f277af2092974e11d39`. Its packaged
 Role is the legacy implementation. See the [v0.1.0 notes](docs/releases/v0.1.0.md),
 [Phase 1 evidence](docs/p1-evidence.md) and [GitHub Pre-release](https://github.com/ansible-roles-mamono210/ruby_install/releases/tag/v0.1.0).
 
-## v1.0.0 contract
+<a name="v100-contract"></a>
+
+## Role contract
 
 This section consolidates the adopted technical requirements for v1.0.0. Its
 source is Redmine project 419, `20261108_ruby_100_roadmap_chatgpt_002_contract`
@@ -40,6 +43,13 @@ earlier candidate values and historical status descriptions. The Roadmap,
 the staged release scope. This README is the repository
 destination for the technical contract; source code and test evidence determine
 what has actually been implemented and verified.
+
+For v1.1.0, Redmine project 256 (`ruby_install`), ticket #5576 specifies the
+two additional source archives, twelve release conditions and version-parallel
+CI. The new archive digests come from the official release announcements.
+The public variable names, types and defaults, prefix state decisions and
+schema-1 installation record carry forward from v1.0.0.
+[Ruby 3.4.13](https://www.ruby-lang.org/en/news/2026/11/18/ruby-3-4-13-released/) · [Ruby 4.0.10](https://www.ruby-lang.org/en/news/2026/11/18/ruby-4-0-10-released/)
 
 ### Scope and execution requirements
 
@@ -64,7 +74,7 @@ publication are outside v1.0.0.
 
 ### Public variables
 
-The v1.0.0 Role defines these ten defaults.
+The Role defines these ten defaults.
 
 | Variable | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -127,7 +137,9 @@ formats must not reuse these checksums.
 | Ruby | Use | URL | SHA-256 |
 | --- | --- | --- | --- |
 | 3.4.12 | Default and required matrix | https://cache.ruby-lang.org/pub/ruby/3.4/ruby-3.4.12.tar.gz | `5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479` |
+| 3.4.13 | Added in v1.1.0 | https://cache.ruby-lang.org/pub/ruby/3.4/ruby-3.4.13.tar.gz | `d0d3bf3dd8c224a3c3b7ecd816a0f1b2cbcf4f87b5afcbdbe91d3fef177f351a` |
 | 4.0.9 | Additional required matrix | https://cache.ruby-lang.org/pub/ruby/4.0/ruby-4.0.9.tar.gz | `c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511` |
+| 4.0.10 | Added in v1.1.0 | https://cache.ruby-lang.org/pub/ruby/4.0/ruby-4.0.10.tar.gz | `b53eef3371fa5d3e3b74340edcd015f06d5d8853968d4e539a5264fce41ed9f1` |
 
 An empty URL is derived from the requested full version and its major/minor
 series. An empty checksum is resolved from this table only when the URL is
@@ -250,9 +262,9 @@ installation must not install dependencies or change CRB.
 
 | Target | Configure/build contract |
 | --- | --- |
-| Both fixed Ruby versions | Explicit `--prefix`, `--enable-shared`, `--enable-rpath`, `--enable-option-checking=fatal`, `--disable-install-capi` |
-| Ruby 3.4.12 | Explicit `--disable-yjit` and `--disable-rjit` |
-| Ruby 4.0.9 | Explicit `--disable-yjit` and `--disable-zjit` |
+| All registered Ruby versions | Explicit `--prefix`, `--enable-shared`, `--enable-rpath`, `--enable-option-checking=fatal`, `--disable-install-capi` |
+| Ruby 3.4.12 and 3.4.13 | Explicit `--disable-yjit` and `--disable-rjit` |
+| Ruby 4.0.9 and 4.0.10 | Explicit `--disable-yjit` and `--disable-zjit` |
 | Documentation true | Explicit `--enable-install-doc` and `--enable-install-rdoc` |
 | Documentation false | Add `--disable-install-doc`; omit standard document generation/installation |
 | Parallelism | Default build jobs 1; sequential installation |
@@ -414,8 +426,11 @@ rule; it does not establish stock non-root privileges or production become setup
 
 ### Installation example
 
-Make the Role available as `ruby_install` on the controller. This play installs
-the default Ruby with standard documentation and links disabled.
+Make the Role available as `ruby_install` on the controller. This play selects
+Ruby 3.4.13 for a fresh prefix, with standard documentation and links disabled.
+Use `"4.0.10"` to select the registered Ruby 4.0 update. Omitting the version
+selects 3.4.12 so existing default installations can rerun the same playbook.
+Requesting a different Ruby for a recorded prefix stops with `VERSION_MISMATCH:`.
 
 ```yaml
 ---
@@ -426,7 +441,7 @@ the default Ruby with standard documentation and links disabled.
   roles:
     - role: ruby_install
       vars:
-        ruby_install_version: "3.4.12"
+        ruby_install_version: "3.4.13"
         ruby_install_prefix: /opt/ruby
         ruby_install_documentation: true
         ruby_install_create_symlinks: false
@@ -477,33 +492,27 @@ The existing known-warning exception applies only to the fixed controller's
 Collection-list observation, under the identity checks recorded in contract v9
 section 13. It is not a blanket warning exemption for playbooks, lint or tests.
 
-For v0.2.0, v0.3.0 and v1.0.0, the required Role matrix has six conditions,
-each including installation,
-functional verification and an identical second run:
+For v1.1.0, run these three fresh installations for each of Ruby 3.4.12,
+3.4.13, 4.0.9 and 4.0.10. Each of the twelve conditions uses the candidate Role.
 
-| Ruby | Prefix | Standard documentation | Rust in test environment |
+| Condition | Prefix | Standard documentation | Rust in test environment |
 | --- | --- | --- | --- |
-| 3.4.12 | `/opt/ruby` | On | Absent |
-| 3.4.12 | Custom | Off | Absent |
-| 3.4.12 | `/opt/ruby` | On | Present |
-| 4.0.9 | `/opt/ruby` | On | Absent |
-| 4.0.9 | Custom | Off | Absent |
-| 4.0.9 | `/opt/ruby` | On | Present |
+| Default | `/opt/ruby` | On | Absent |
+| Custom | `/opt/ruby-custom` | Off | Absent |
+| Rust | `/opt/ruby` | On | Present |
 
-Rust-present conditions still require full builds and build/runtime JIT checks.
-The six conditions are neither a complete Cartesian product nor six fixed CI
-jobs. Preserve the four categories: trailing-whitespace, yamllint, ansible-lint
-and molecule. Run the full matrix sequentially for final code-changing PR
-candidates and release candidates for these implementation releases; separate
-checks that do not require builds. The v0.1.0 evaluation snapshot has its own
-limited acceptance scope below.
+Each condition includes a full build, runtime checks, check mode and an identical
+normal rerun. Earlier releases through v1.0.0 used six serial conditions for
+3.4.12 and 4.0.9. Their recorded v0.2.0 installation records provide an
+additional comparison for those six conditions. All twelve are checked against
+the requested settings and official source digests.
 
 Additional required checks retain the contract's IDs. These are design
 requirements, not names of existing Molecule scenarios or CI jobs:
 
 | ID | Required coverage |
 | --- | --- |
-| T01–T03 | Both Ruby versions, default/custom prefix, version/path/RbConfig identity, healthy identical rerun without rebuild or other unnecessary changes |
+| T01–T03 | Registered Ruby versions, default/custom prefix, version/path/RbConfig identity, healthy identical rerun without rebuild or other unnecessary changes |
 | T04–T05 | Existing different/unmanaged/partial/broken/mismatched installations remain protected; OS Ruby coexists outside managed paths |
 | T06 | Version/URL/checksum rules, actual byte verification and redirect rejection before destination requests, including HTTPS→HTTP and HTTPS→HTTP→HTTPS paths |
 | T07–T08 | Link off/on/reuse/conflict, all sources checked first, disable/list reduction with residual links |
@@ -526,41 +535,65 @@ with the pre-run snapshot. The specified build workspace must stay absent.
 The fixture uses one target CPU, 2 GiB of memory and one make job. Its build
 has a 20-minute timeout. Ordinary CI installs Ruby 3.4.12 with documentation
 using the published v0.2.0 Role, then exercises the candidate on that prefix.
-The release workflow first installs Ruby 4.0.9 with the published v0.3.0 Role
-in the custom prefix, with documentation off and `bundle` and `rake` linked.
-Candidate reruns must reuse both links before adding `ruby` and `gem`.
-The six fresh-install conditions use the candidate. Its Ruby 4.0.9 Rust-present
-condition publishes `bundle` and `rake` during installation. All six conditions
-preview, add and reuse `ruby` and `gem` on the recorded installation.
+Release CI starts two compatibility jobs after `preflight`. Each fetches the
+published tag and checks its commit before using the old Role for installation.
+
+- `upgrade-from-v0.3.0` installs Ruby 4.0.9 in the custom prefix with
+  documentation off and `bundle` and `rake` linked. The candidate reuses these
+  links, then previews, adds and reuses `ruby` and `gem`.
+- `upgrade-from-v1.0.0` installs the default Ruby with `ruby` and `gem` linked.
+  Candidate check mode and normal reruns must report zero changes. A normal
+  request for 3.4.13 in the same prefix must return `VERSION_MISMATCH:`.
+  Compare the prefix, public commands, RPM inventory and repository settings
+  immediately before and after this request. The artifacts include both Git
+  revisions, the observed reason, link targets and both snapshots.
 
 The preflight scenarios also exercise a noexec workspace, HTTPS redirects,
-a checksum mismatch and retention of a failed configure log. The Ruby 3.4.12
-custom-prefix matrix row compares the distribution Ruby before and after the
-Role. The first fresh-install row retrieves the candidate by full SHA into a new
-directory and runs the Role from that checkout.
+a checksum mismatch and retention of a failed configure log. Both Ruby 3.4
+custom-prefix conditions compare the distribution Ruby before and after the
+Role. Both Ruby 4.0 Rust conditions publish `bundle` and `rake` during the
+initial install. All twelve fresh-install conditions preview, add and reuse
+`ruby` and `gem`. The 3.4.12 default condition retrieves the candidate by full
+SHA into a new directory and runs the Role from that checkout.
 
-For a final candidate, run a pipeline on its branch with the boolean parameter
-`run_v020_release_matrix=true` and the other probe flags at their defaults.
-The `v020-release-matrix` workflow runs lint, preflight, the v0.3.0 compatibility
-job, then the six rows above in order. Each row gets a fresh target with the
-pinned controller and target images. A Rust-present fixture must compile an object before the Role
+For the final `feature/v1.1.0-release` commit, run normal CI once and a second
+pipeline on that SHA with `run_v020_release_matrix=true` and other flags at
+their defaults. In `v020-release-matrix`, the three lint jobs precede
+`preflight`. The v0.3.0 compatibility job gates all four default conditions.
+The v1.0.0 compatibility job runs independently and is required for release.
+Each version runs default, custom, then Rust in order. A failure blocks its
+dependent jobs, while other version chains can continue. Every required job
+must succeed before publication. Each row gets a fresh target with the pinned
+controller and target images. A Rust-present fixture must compile an object before the Role
 runs. Each row checks the Role's installation record, nine managed commands,
 native libraries, build and runtime JIT state, and the requested documentation.
 Check mode and the identical normal rerun must both report zero changes.
 The verifier compares hashes of the prefix, public commands, RPM inventory and
 repository settings before and after these reruns. Each job keeps the Molecule
 log, exit code and, on success, `case.json` and `result.json` under the
-`ruby-install-default` artifacts. A failed job blocks the remaining rows.
+`ruby-install-default` artifacts. Both files identify the candidate commit and
+condition. The result also identifies the installer commit.
 
-The initial full-Role test planning basis is target CPU1, memory limit 2 GiB,
-no additional swap, make jobs 1, one condition at a time and no automatic retries.
-This does not limit the public build-jobs input to 1 or guarantee host RAM needs.
-The initial planning allowance is 1500 credits and a 20-minute stop-decision
-threshold per build condition. Before any run, check current pricing, balance,
-resource class and the complete job estimate, and implement timeout/child-process
-termination, failure evidence and cleanup. These values are not billing caps or
-authorization to trigger CI or a combined budget for three releases. On OOM or
-timeout, retain evidence and stop; do not silently reduce coverage or rerun.
+Each target has 1 CPU and 2 GiB of memory, no extra swap and one make job. Keep
+the 20-minute stop decision per condition. Retain failure evidence and clean up
+on OOM or timeout. Diagnose and estimate any retry separately.
+
+Record the candidate SHA, workflow URLs, actual credits, and elapsed time from
+pipeline creation to release workflow completion. Record start and end times
+of two fresh-install jobs for different Ruby versions. The later start must
+precede the earlier end to demonstrate overlap. The historical baseline is
+67 minutes 11 seconds and 662 credits for release CI #484. At 10 credits per
+Linux Medium VM minute, #5576 estimates about 1,220 credits for release CI,
+1,400 including candidate normal CI, or 1,580 with an automatic normal run on
+`main`. Check current pricing, resource class and balance against the full
+estimate before triggering CI. The original 1,500 credits was a planning figure.
+[v1.0.0 verification](docs/releases/v1.0.0.md#release-verification) · [CircleCI pricing](https://circleci.com/pricing/price-list/)
+
+Fast-forward `main` to the verified SHA and check any automatic normal CI.
+Reuse the successful release workflow at that exact SHA. If the SHA changes,
+estimate and verify the new candidate. Publish tag `v1.1.0` and its GitHub
+Release after the gates pass, then fetch the tag into a separate directory and
+compare `git rev-parse 'v1.1.0^{commit}'` with the verified SHA.
 
 #### Evaluation completed before Role implementation
 
@@ -584,7 +617,7 @@ Role. Its artifact intentionally keeps `role_verified`, `p1_04_complete` and
 
 ### Release and compatibility
 
-Role release numbers are distinct from Ruby 3.4.12 or 4.0.9. The adopted
+Role release numbers are independent of the selected Ruby version. The adopted
 stages retain Phase 1–7 responsibilities; verification, documentation and
 publication (Phases 5–7) apply to each release's scope.
 
@@ -594,6 +627,7 @@ publication (Phases 5–7) apply to each release's scope.
 | v0.2.0 | Phases 2+3: installation, complete post-install checks, Role-generated records, healthy identical rerun, invalid-state protection and owned workspace management. Six real Role conditions, normal four CI categories, applicable T01–T06 and T09–T15, T07 input validation and T08 disabled-link residual protection. Link-ON requests stop before changes. Include minimum manual recovery and migration instructions. |
 | v0.3.0 | Phase 4: full T07/T08 link publication and failure handling; v0.2.0 regressions, six real Role conditions and normal four CI categories. Prove rerun/link addition using records actually written by v0.2.0. Extra gem commands remain outside publication scope. |
 | v1.0.0 | Complete T01–T15, six real Role conditions, normal four CI categories, v0.2.0/v0.3.0 prefix/link compatibility, distribution and migration/recovery examples. Finalize the public contract without adding unrelated features to the completion criteria. |
+| v1.1.0 | Compatible addition of two registered sources. Twelve fresh builds, version-parallel release CI and a rerun/mismatch check using a v1.0.0 installation. |
 
 Git tags `v0.1.0`, `v0.2.0` and `v0.3.0` were published as GitHub pre-releases.
 Tag `v1.0.0` is the first stable release. The Roadmap specifies `0.1.0`,

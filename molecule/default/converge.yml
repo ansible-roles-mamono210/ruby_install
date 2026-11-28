@@ -4,7 +4,7 @@
   become: true
   vars_files: [vars/main.yml]
   pre_tasks:
-    - name: Select the second Ruby only for its three release conditions
+    - name: Set the requested version for nondefault Rubies
       ansible.builtin.set_fact:
         ruby_install_version: "{{ ruby_install_test_version }}"
       when: ruby_install_test_version != '3.4.12'
@@ -20,7 +20,7 @@
         path: /var/tmp/ruby-install-default-baseline.json
       register: ruby_install_test_baseline
 
-    - name: Exercise opt-in publication during one fresh installation and both reruns
+    - name: Use the same selected links for installation and both reruns
       ansible.builtin.set_fact:
         ruby_install_create_symlinks: true
         ruby_install_symlink_commands: "{{ ruby_install_test_initial_links }}"

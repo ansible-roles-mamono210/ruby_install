@@ -7,7 +7,9 @@ from urllib.parse import unquote, urlsplit
 
 CHECKSUMS = {
     "3.4.12": "5e5d85ad93b0adcccbad47733680f4892bd0078e3342437f7babce01c1872479",
+    "3.4.13": "d0d3bf3dd8c224a3c3b7ecd816a0f1b2cbcf4f87b5afcbdbe91d3fef177f351a",
     "4.0.9": "c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511",
+    "4.0.10": "b53eef3371fa5d3e3b74340edcd015f06d5d8853968d4e539a5264fce41ed9f1",
 }
 
 

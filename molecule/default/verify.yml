@@ -30,7 +30,7 @@
         executable: /usr/bin/python3
       register: ruby_install_test_os_ruby
       changed_when: false
-      when: ruby_install_test_condition == '3.4.12-custom'
+      when: ruby_install_test_os_ruby_case
 
     - name: Verify the actual Rust environment after the Role
       ansible.builtin.script:
@@ -67,7 +67,7 @@
           canonical_prefix: "{{ ruby_install_test_prefix }}"
           source_sha256: "{{ ruby_install_test_sha256[ruby_install_test_version] }}"
           shared: true
-          jit: "{{ {'yjit': false, 'rjit': false} if ruby_install_test_version == '3.4.12' else {'yjit': false, 'zjit': false} }}"
+          jit: "{{ {'yjit': false, 'rjit': false} if ruby_install_test_version.startswith('3.4.') else {'yjit': false, 'zjit': false} }}"
           documentation: "{{ ruby_install_test_docs }}"
       ansible.builtin.assert:
         that:
@@ -76,17 +76,25 @@
           - (ruby_install_test_rust_before.content | b64decode | from_json) == (ruby_install_test_rust_after.stdout | from_json)
           - ruby_install_workspaces.matched == 0
 
-    - name: Check link publication against the recorded v0.2.0 condition
+    - name: Check adding and reusing links on the installed Ruby
       ansible.builtin.include_tasks: tasks/verify_links.yml
+      when: ruby_install_test_installer != 'v1.0.0'
       vars:
         ruby_install_version: "{{ ruby_install_test_version }}"
         ruby_install_prefix: "{{ ruby_install_test_prefix }}"
         ruby_install_documentation: "{{ ruby_install_test_docs }}"
         ruby_install_workspace: /var/tmp/ruby-install-link-test-unused
 
+    - name: Check the candidate's response to a version change on the v1.0.0 installation
+      ansible.builtin.include_tasks: tasks/verify_version_mismatch.yml
+      when: ruby_install_test_installer == 'v1.0.0'
+      vars:
+        ruby_install_test_requested_version: "3.4.13"
+
     - name: Save this condition's observations for the CI artifacts
       vars:
         ruby_install_test_result:
+          commit: "{{ lookup('ansible.builtin.env', 'RUBY_INSTALL_TEST_COMMIT') }}"
           condition: "{{ ruby_install_test_condition }}"
           record: "{{ ruby_install_record.content | b64decode | from_json }}"
           runtime: "{{ ruby_install_test_runtime.stdout | from_json }}"
@@ -97,7 +105,8 @@
           after_reruns: "{{ ruby_install_after.stdout | from_json }}"
           workspaces_after_reruns: "{{ ruby_install_workspaces.matched }}"
           installation_role: "{{ ruby_install_test_installer }}"
-          publication: "{{ ruby_install_test_link_result }}"
+          publication: "{{ ruby_install_test_link_result | default(none) }}"
+          version_mismatch: "{{ ruby_install_test_mismatch | default(none) }}"
       ansible.builtin.copy:
         dest: /var/tmp/ruby-install-case.json
         content: "{{ ruby_install_test_result | to_nice_json }}\n"

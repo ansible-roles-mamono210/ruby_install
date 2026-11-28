@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -21,11 +22,19 @@ class Inputs(unittest.TestCase):
         return inputs.resolve_inputs(version, url, checksum, prefix, workspace)
 
     def test_registered_sources(self):
-        for version, digest in inputs.CHECKSUMS.items():
+        official = json.loads((ROOT / "tests/fixtures/release_source_sha256.json").read_text())
+        self.assertEqual(set(official), {"3.4.12", "3.4.13", "4.0.9", "4.0.10"})
+        self.assertEqual(inputs.CHECKSUMS, official)
+        rows = re.findall(r"^\| (\d+\.\d+\.\d+) \|[^|]*\| (https://\S+) \| `([0-9a-f]{64})` \|$",
+                          (ROOT / "README.md").read_text(), re.MULTILINE)
+        self.assertEqual(len(rows), len(official))
+        for version, url, digest in rows:
             result = self.resolve(version)
-            self.assertEqual(result["sha256"], digest)
-            self.assertEqual(result["url"], "https://cache.ruby-lang.org/pub/ruby/{}/ruby-{}.tar.gz".format(
-                version.rsplit(".", 1)[0], version))
+            self.assertEqual(result["error"], "")
+            self.assertEqual(result["sha256"], official[version])
+            self.assertEqual((url, digest), (result["url"], result["sha256"]))
+            self.assertEqual(url, f"https://cache.ruby-lang.org/pub/ruby/{version.rsplit('.', 1)[0]}/ruby-{version}.tar.gz")
+        self.assertEqual({v for v, _, _ in rows}, set(official))
 
     def test_stable_versions_only(self):
         for version in ("3.4", "4.1.0", "4.0.01", "3.4.12-preview1", " 3.4.12", "3.4.12\n", False):
@@ -35,13 +44,17 @@ class Inputs(unittest.TestCase):
     def test_custom_source_and_unregistered_patch(self):
         digest = "A0" * 32
         for url in ("", "https://example.org/ruby.tgz?key=private", "https://[::1]:444/file"):
-            self.assertEqual(self.resolve("4.0.10", url, "sha256:" + digest)["sha256"], digest.lower())
-            self.assertIn("INVALID_INPUT:", self.resolve("4.0.10", url)["error"])
+            self.assertEqual(self.resolve("4.0.99", url, "sha256:" + digest)["sha256"], digest.lower())
+            self.assertIn("INVALID_INPUT:", self.resolve("4.0.99", url)["error"])
 
     def test_registered_artifact_cannot_override_digest(self):
-        for url in ("", self.resolve()["url"], "https://CACHE.RUBY-LANG.ORG.:443/pub/ruby/3.4/./ruby-3.4.12.tar.gz?token=x"):
-            self.assertIn("INVALID_INPUT:", self.resolve(url=url, checksum="sha256:" + "0" * 64)["error"])
-        self.assertIn("INVALID_INPUT:", self.resolve(url=self.resolve()["url"])["error"])
+        for version in inputs.CHECKSUMS:
+            official = self.resolve(version)["url"]
+            for url in ("", official):
+                self.assertIn("INVALID_INPUT:", self.resolve(version, url, "sha256:" + "0" * 64)["error"])
+            self.assertIn("INVALID_INPUT:", self.resolve(version, official)["error"])
+        alias = "https://CACHE.RUBY-LANG.ORG.:443/pub/ruby/3.4/./ruby-3.4.12.tar.gz?token=x"
+        self.assertIn("INVALID_INPUT:", self.resolve(url=alias, checksum="sha256:" + "0" * 64)["error"])
 
     def test_bad_urls_are_not_echoed(self):
         for address in ("http://x/private", "https://u:private@x/z", "https://:private",

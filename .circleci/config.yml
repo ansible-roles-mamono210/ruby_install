@@ -120,10 +120,22 @@ jobs:
     parameters:
       condition:
         type: enum
-        enum: [3.4.12-default, 3.4.12-custom, 3.4.12-rust, 4.0.9-default, 4.0.9-custom, 4.0.9-rust]
+        enum:
+          - 3.4.12-default
+          - 3.4.12-custom
+          - 3.4.12-rust
+          - 3.4.13-default
+          - 3.4.13-custom
+          - 3.4.13-rust
+          - 4.0.9-default
+          - 4.0.9-custom
+          - 4.0.9-rust
+          - 4.0.10-default
+          - 4.0.10-custom
+          - 4.0.10-rust
       installer:
         type: enum
-        enum: [candidate, v0.3.0]
+        enum: [candidate, v0.3.0, v1.0.0]
         default: candidate
     environment:
       MATRIX_CONTROLLER: &v020_controller ghcr.io/docker-images-mamono210/circleci-executors/molecule-docker@sha256:a80f2c478e9e183cdd782f8cdff79d1025cdc5291190e360898738fd8e6f7f41
@@ -374,7 +386,7 @@ workflows:
             - ansible-lint
           filters:
             branches:
-              only: [main, feature/v0.2.0-install, feature/v0.3.0-links, feature/v1.0.0-release]
+              only: [main, feature/v0.2.0-install, feature/v0.3.0-links, feature/v1.0.0-release, feature/v1.1.0-release]
       - molecule:
           molecule-no-output-timeout: 22m
           matrix:
@@ -437,6 +449,11 @@ workflows:
           installer: v0.3.0
           requires: [preflight]
       - v020-role-condition:
+          name: upgrade-from-v1.0.0
+          condition: 3.4.12-default
+          installer: v1.0.0
+          requires: [preflight]
+      - v020-role-condition:
           name: ruby-3.4.12-default
           condition: 3.4.12-default
           requires: [upgrade-from-v0.3.0]
@@ -449,9 +466,21 @@ workflows:
           condition: 3.4.12-rust
           requires: [ruby-3.4.12-custom]
       - v020-role-condition:
+          name: ruby-3.4.13-default
+          condition: 3.4.13-default
+          requires: [upgrade-from-v0.3.0]
+      - v020-role-condition:
+          name: ruby-3.4.13-custom
+          condition: 3.4.13-custom
+          requires: [ruby-3.4.13-default]
+      - v020-role-condition:
+          name: ruby-3.4.13-rust
+          condition: 3.4.13-rust
+          requires: [ruby-3.4.13-custom]
+      - v020-role-condition:
           name: ruby-4.0.9-default
           condition: 4.0.9-default
-          requires: [ruby-3.4.12-rust]
+          requires: [upgrade-from-v0.3.0]
       - v020-role-condition:
           name: ruby-4.0.9-custom
           condition: 4.0.9-custom
@@ -460,3 +489,15 @@ workflows:
           name: ruby-4.0.9-rust
           condition: 4.0.9-rust
           requires: [ruby-4.0.9-custom]
+      - v020-role-condition:
+          name: ruby-4.0.10-default
+          condition: 4.0.10-default
+          requires: [upgrade-from-v0.3.0]
+      - v020-role-condition:
+          name: ruby-4.0.10-custom
+          condition: 4.0.10-custom
+          requires: [ruby-4.0.10-default]
+      - v020-role-condition:
+          name: ruby-4.0.10-rust
+          condition: 4.0.10-rust
+          requires: [ruby-4.0.10-custom]

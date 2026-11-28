@@ -1,4 +1,4 @@
-"""Independent target observations for the six supported release conditions (Python 3.9)."""
+"""Independent target observations for the Ruby release matrix (Python 3.9)."""
 import argparse
 import hashlib
 import json
@@ -100,7 +100,7 @@ def main():
     compiler = sub.add_parser("rust")
     compiler.add_argument("profile", choices=("default", "custom", "rust"))
     runtime = sub.add_parser("ruby")
-    runtime.add_argument("version", choices=("3.4.12", "4.0.9"))
+    runtime.add_argument("version", choices=("3.4.12", "3.4.13", "4.0.9", "4.0.10"))
     runtime.add_argument("prefix", type=Path)
     runtime.add_argument("profile", choices=("default", "custom", "rust"))
     args = parser.parse_args()

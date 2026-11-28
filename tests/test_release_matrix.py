@@ -1,5 +1,6 @@
-"""Regression checks for the six-case workflow and its evidence gate."""
+"""Regression checks for the release workflow and its evidence gate."""
 import importlib.util
+import json
 from pathlib import Path
 import shlex
 import unittest
@@ -76,31 +77,41 @@ class ReleaseMatrix(unittest.TestCase):
             self.assertTrue(any(isinstance(item, dict) and "ansible-lint" in item
                                 for item in config["workflows"][name]["jobs"]))
 
-    def test_workflow_has_one_sequential_job_per_condition(self):
+    def test_release_jobs_chain_by_version_after_the_shared_gate(self):
         config = yaml.safe_load((ROOT / ".circleci/config.yml").read_text())
         jobs = config["workflows"]["v020-release-matrix"]["jobs"]
-        cases = [f"{v}-{p}" for v in ("3.4.12", "4.0.9") for p in ("default", "custom", "rust")]
-        self.assertEqual(config["jobs"]["v020-role-condition"]["parameters"]["condition"]["enum"], cases)
-        self.assertEqual(len(jobs), 5 + len(cases))
+        versions = ("3.4.12", "3.4.13", "4.0.9", "4.0.10")
+        profiles = ("default", "custom", "rust")
+        cases = [f"{v}-{p}" for v in versions for p in profiles]
+        job_parameters = config["jobs"]["v020-role-condition"]["parameters"]
+        self.assertCountEqual(job_parameters["condition"]["enum"], cases)
+        self.assertCountEqual(job_parameters["installer"]["enum"], ["candidate", "v0.3.0", "v1.0.0"])
+        self.assertEqual(job_parameters["installer"]["default"], "candidate")
         self.assertEqual(jobs[0], "trailing-whitespace")
         self.assertEqual(jobs[1]["yamllint"]["requires"], ["trailing-whitespace"])
         self.assertEqual(jobs[2]["ansible-lint"]["requires"], ["yamllint"])
         self.assertEqual(jobs[3]["molecule"]["requires"], ["ansible-lint"])
-        upgrade = jobs[4]["v020-role-condition"]
-        self.assertEqual(upgrade, {"name": "upgrade-from-v0.3.0", "condition": "4.0.9-custom",
-                                    "installer": "v0.3.0", "requires": [jobs[3]["molecule"]["name"]]})
-        job_parameters = config["jobs"]["v020-role-condition"]["parameters"]
-        self.assertEqual(job_parameters["installer"]["default"], "candidate")
-        previous = upgrade["name"]
-        for job, case in zip(jobs[5:], cases):
-            row = job["v020-role-condition"]
-            self.assertEqual(row, {"condition": case, "name": "ruby-" + case, "requires": [previous]})
-            previous = row["name"]
+        self.assertEqual(jobs[3]["molecule"]["name"], "preflight")
+        rows = [job["v020-role-condition"] for job in jobs[4:]]
+        by_name = {row["name"]: row for row in rows}
+        self.assertCountEqual([row["name"] for row in rows],
+                              ["upgrade-from-v0.3.0", "upgrade-from-v1.0.0"] + ["ruby-" + case for case in cases])
+        for installer, condition in (("v0.3.0", "4.0.9-custom"), ("v1.0.0", "3.4.12-default")):
+            name = "upgrade-from-" + installer
+            self.assertEqual(by_name[name], {"name": name, "condition": condition, "installer": installer, "requires": ["preflight"]})
+        for version in versions:
+            previous = "upgrade-from-v0.3.0"
+            for profile in profiles:
+                condition = f"{version}-{profile}"
+                name = "ruby-" + condition
+                self.assertEqual(by_name[name], {"condition": condition, "name": name, "requires": [previous]})
+                previous = name
 
     def test_installer_must_run_first_and_candidate_must_run_both_reruns(self):
         log = recap_log("ruby_install_v030")
         evidence.play_recaps(log, "v0.3.0")
         evidence.play_recaps(recap_log("ruby_install_v020"), "v0.2.0")
+        evidence.play_recaps(recap_log("ruby_install_v100"), "v1.0.0")
         evidence.play_recaps(recap_log(), "candidate")
         for wrong in (recap_log(), recap_log("ruby_install_v020"),
                       log.replace("TASK [ruby_install :", "TASK [ruby_install_v030 :", 1),
@@ -121,6 +132,40 @@ class ReleaseMatrix(unittest.TestCase):
         preflight = next(item["molecule"] for item in config["workflows"]["build"]["jobs"]
                          if isinstance(item, dict) and item.get("molecule", {}).get("name") == "preflight")
         self.assertIn("feature/v1.0.0-release", preflight["filters"]["branches"]["only"])
+        self.assertIn("feature/v1.1.0-release", preflight["filters"]["branches"]["only"])
+
+    def test_release_records_preserve_the_historical_schema_and_check_all_four_artifacts(self):
+        historical = json.loads((ROOT / "tests/fixtures/v020_install_records.json").read_text())
+        for case in historical["cases"]:
+            version, profile = case["condition"].split("-")
+            prefix = "/opt/ruby-custom" if profile == "custom" else "/opt/ruby"
+            evidence.installation_record(case["record"], version, prefix, profile != "custom")
+        for version, series_jit in (("3.4.13", "rjit"), ("4.0.10", "zjit")):
+            record = {"schema_version": 1, "state": "complete", "ruby_version": version, "canonical_prefix": "/opt/ruby",
+                      "source_sha256": evidence.SOURCE_SHA256[version], "documentation": True,
+                      "shared": True, "jit": {"yjit": False, series_jit: False}}
+            evidence.installation_record(record, version, "/opt/ruby", True)
+            for override in (dict(schema_version=True), dict(source_sha256="0" * 64), dict(ruby_version="3.4.12"),
+                             dict(canonical_prefix="/opt/other"), dict(documentation=False), dict(shared=False),
+                             dict(jit={"yjit": False}), dict(state="incomplete")):
+                with self.subTest(version=version, override=override), self.assertRaises(ValueError):
+                    evidence.installation_record(dict(record, **override), version, "/opt/ruby", True)
+
+    def test_mismatch_requires_the_reason_and_all_four_unchanged_snapshots(self):
+        snapshot = dict(prefix="1" * 64, public_commands="2" * 64, installed_packages="3" * 64, repository_files="4" * 64)
+        observed = dict(requested_version="3.4.13", reason="VERSION_MISMATCH: recorded Ruby version differs",
+                        changed=False, before=snapshot, after=dict(snapshot), targets=["/opt/ruby/bin/ruby", "/opt/ruby/bin/gem"])
+        evidence.version_mismatch(observed, snapshot)
+        for field in snapshot:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                evidence.version_mismatch(dict(observed, after=dict(snapshot, **{field: "f" * 64})), snapshot)
+            incomplete = {k: v for k, v in snapshot.items() if k != field}
+            with self.assertRaises(ValueError):
+                evidence.version_mismatch(dict(observed, before=incomplete, after=incomplete), incomplete)
+        for change in (dict(reason="UNSAFE_PATH: unsafe prefix"), dict(reason="Role returned successfully"),
+                       dict(changed=True), dict(targets=[]), dict(requested_version="4.0.10")):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                evidence.version_mismatch(dict(observed, **change), snapshot)
 
     def test_missing_duplicate_failed_and_changed_reruns_do_not_pass(self):
         log = recap_log()

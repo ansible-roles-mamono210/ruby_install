@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.0 — unreleased
+
+- Register the official Ruby 3.4.13 and 4.0.10 source archives for installation
+  by version alone. The default Ruby is 3.4.12 and the installation record uses
+  schema 1.
+- Run twelve release builds in four independent Ruby-version chains. Within
+  each chain the default, custom and Rust conditions run in order.
+- Add a compatibility check that installs the published v1.0.0 Role with its
+  default Ruby and two command links. The candidate must reuse the installation
+  and report `VERSION_MISMATCH:` on a 3.4.13 request with all four snapshots intact.
+
 ## v1.0.0 — 2026-11-26 (JST)
 
 - Add a release check against a Ruby installation and two command links created
